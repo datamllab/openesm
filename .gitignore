@@ -1,0 +1,45 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.DS_Store
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.log
+*.out
+*.err
+wandb/
+outputs/
+logs/
+checkpoints/
+.cache/
+.nv/
+.triton/
+lightning_logs/
+*.ckpt
+*.safetensors
+*.pt
+*.pth
+*.pkl
+*.bin
+.env
+.env.*
+data/
+
+# Cluster resource submitters are local infrastructure, not public runs.
+rjob/
+
+# Historical launchers and parameter sweeps are kept outside the GitHub tree.
+archive/
+
+# Internal planning and directory notes are not part of the public repository.
+目录说明.md
+next.md
+
+# Local release helper; keep credentials and staging logic out of GitHub.
+publish_openesm.sh

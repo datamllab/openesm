@@ -1,0 +1,84 @@
+
+model_name: "esm"
+model_size: "d6"
+modality: "NLP"
+time_embedding: true
+tokenizer: "esm_bpe"
+vocab_size: 32768
+
+dataset_name: "dclm"
+dataset_arg_name: "esm"
+base_train_dataset: "dclm"
+base_train_data_root: "${ESM_DATA_ROOT:-data}"
+esm_asset_root: "${ESM_ASSET_ROOT:-.cache}"
+
+node_count: 2
+proc_per_node: 8
+device_batch_size: 4
+global_batch_size: 512
+context_length: 2048
+
+target_total_tokens: "${TARGET_TOTAL_TOKENS:-100000000}"
+val_check_interval: 560
+run_prefix: "pretrain-dclm-d6"
+
+mcmc_step_size: 300.0
+mcmc_step_size_lr_multiplier: 1500
+mcmc_num_steps: 1
+truncate_mcmc: true
+denoising_initial_condition: "random_noise"
+free_embed_noise_scale: 1.0
+mcmc_step_size_learnable: true
+tf_head_type: "direct_unembed"
+use_tf_head: true
+free_embedding_mcmc: true
+pretokenize_dataset: true
+
+peak_learning_rate: 0.0012
+weight_decay: 0.2
+beta1: 0.8
+beta2: 0.95
+gradient_clip_val: 1.0
+optimizer: "muon_adamw"
+dynamic_wd: true
+linear_warmdown: true
+warmup_ratio: 0.0057
+warmdown_ratio: 0.65
+final_lr_frac: 0.05
+muon_lr: 0.02
+muon_momentum: 0.95
+muon_ns_steps: 5
+muon_beta2: 0.95
+muon_momentum_warmup_steps: 300
+adamw_embedding_lr: 0.3
+adamw_vocab_to_embed_lr: 0.01
+adamw_scalar_lr: 0.04
+adamw_dmodel_lr_scaling: true
+ffn_dim_multiplier: 2.67
+esm_act_func: "silu"
+esm_norm: "rms"
+weight_initialization_method: "xavier"
+weight_initialization_gain: 1.0
+gaussian_random_noise_scaling: 1.0
+
+use_sdpa_attention: false
+use_deepspeed_stage3: false
+gradient_checkpointing: false
+val_steps: 1000
+limit_val_batches: 50
+val_sanity: 1
+save_top_k: 2
+save_periodic_steps: 1000
+checkpoint_monitor_string: "valid_loss"
+checkpoint_monitor_mode: "min"
+wandb_project: "nlp_pretrain"
+matmul_precision: "medium"
+float_precision: "bf16-mixed"
+manual_gc_steps: -1
+log_model_archi: true
+compile_flags: "--compile_model --compile_mode transformer_only"
+output_root: "${ESM_OUTPUT_ROOT:-.}"
+log_root: "${ESM_LOG_ROOT:-}"
+checkpoint_root: ""
+checkpoint_dir: "${ESM_CHECKPOINT_DIR:-}"
+wandb_save_dir: "${ESM_WANDB_DIR:-}"

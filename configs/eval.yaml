@@ -1,0 +1,17 @@
+
+modality: "NLP"
+time_embedding: true
+tokenizer: "esm_bpe"
+vocab_size: 32768
+dataset_name: "dclm"
+base_train_dataset: "dclm"
+data_root: "${ESM_DATA_ROOT:-data}"
+esm_asset_root: "${ESM_ASSET_ROOT:-.cache}"
+context_length: 2048
+global_batch_size: 512
+device_batch_size: 1
+grad_accum: 32
+task: "position_bpb"
+output_root: "${ESM_OUTPUT_ROOT:-.}"
+log_root: "${ESM_EVAL_LOG_ROOT:-}"
+checkpoint: ""

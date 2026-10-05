@@ -1,0 +1,81 @@
+[project]
+name = "esm"
+version = "0.1.0"
+description = "Energy-based language models with training, evaluation, and inference"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "datasets>=4.0.0",
+    "filelock>=3.0.0",
+    "huggingface-hub>=0.24.0",
+    "jinja2>=3.1.0",
+    "numpy>=1.26.0",
+    "pyarrow>=15.0.0",
+    "psutil>=7.1.0",
+    "pyyaml>=6.0.0",
+    "requests>=2.31.0",
+    "rustbpe>=0.1.0",
+    "setuptools>=80.9.0",
+    "tiktoken>=0.11.0",
+    "tqdm>=4.66.0",
+    "wandb>=0.21.3",
+    "zstandard>=0.25.0",
+    "lightning==2.6.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["esm*", "scripts*", "tasks*"]
+
+[build-system]
+requires = ["setuptools>=80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu128", extra = "gpu" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[project.optional-dependencies]
+cpu = [
+    "torch==2.10.0",
+]
+gpu = [
+    "torch==2.10.0",
+]
+deepspeed = [
+    "deepspeed>=0.19.0",
+]
+
+[tool.uv]
+conflicts = [
+    [
+        { extra = "cpu" },
+        { extra = "gpu" },
+    ],
+]
