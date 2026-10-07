@@ -1,10 +1,55 @@
-# ESM
+<p align="center">
+  <img src="assets/openesm-github-title.png" alt="HarborRL" width=800>
+</p>
 
-ESM is a compact energy-based language-model repository. It contains one
-paper-aligned model implementation and small entry points for pretraining,
-supervised fine-tuning, evaluation, QA, zero-shot evaluation, and generation.
+<!-- <p align="center">
+  <a href="pyproject.toml"><img src="https://img.shields.io/badge/version-1.0.0-blue.svg" alt="Version"></a>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+"></a>
+  <a href="https://pytorch.org/"><img src="https://img.shields.io/badge/PyTorch-2.4%2B-ee4c2c.svg" alt="PyTorch 2.4+"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License"></a>
+</p> -->
 
-## Install
+
+
+
+<p align="center">
+  <a href="https://arxiv.org/abs/2608.07346"><img src="https://img.shields.io/badge/Paper-b31b1b?style=for-the-badge&logo=arxiv&logoColor=white" alt="Paper"/></a>
+  <a href="https://github.com/datamllab/A2E"><img src="https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub"/></a>
+  <a href="https://colab.research.google.com/github/stevewithjobs/AEP/blob/yuchenyue/notebooks/a2e_quickstart.ipynb"><img src="https://img.shields.io/badge/Colab-F9AB00?style=for-the-badge&logo=googlecolab&logoColor=white" alt="Colab"/></a>
+  <a href="https://huggingface.co/papers/2608.07346"><img src="https://img.shields.io/badge/HuggingFace-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black" alt="HuggingFace"/></a>
+</p>
+
+<p align="center">
+  <strong>The first repository for training and scaling up energy-based foundation models</strong>
+</p>
+
+<p align="center">
+  <strong>Keywords: </strong> energy-based models, foundation models, large language models, scaling law
+</p>
+
+
+<p align="center">
+  <a href="#-updates">🎉 Updates</a> •
+  <a href="#1-quick-start">🚀 Quick Start</a> •
+  <a href="#2-scaling-law">📈 Scaling Law</a> •
+  <a href="#3-scaling-law">⚙️ Pretrained Checkpoints</a> •
+</p>
+
+
+
+<p align="center">
+  English · <a href="README_zh.md">简体中文</a>
+</p>
+
+---
+
+## 🎉 Updates
+
+- **2026-10-07** — ✨✨ Full codebase released.
+- **2026-10-07** — 📄 OpenESM preprint posted on [arXiv](https://arxiv.org/abs/2608.07346).
+
+
+## 🚀 Quick Start
 
 From the repository root:
 
