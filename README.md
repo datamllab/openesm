@@ -32,7 +32,8 @@
   <a href="#-updates">🎉 Updates</a> •
   <a href="#1-quick-start">🚀 Quick Start</a> •
   <a href="#2-scaling-law">📈 Scaling Law</a> •
-  <a href="#3-scaling-law">⚙️ Pretrained Checkpoints</a> •
+  <a href="#3-checkpoint">⚙️ Pretrained Checkpoints</a> •
+  <a href="#3-chat">💬 Chat Demo</a>
 </p>
 
 
@@ -50,6 +51,20 @@
 
 
 ## 🚀 Quick Start
+
+...
+
+## 📈 Scaling Law
+
+...
+
+## ⚙️ Pretrained Checkpoints
+
+...
+
+## 💬 Chat Demo
+
+...
 
 From the repository root:
 
