@@ -68,6 +68,10 @@ cpu = [
 gpu = [
     "torch==2.10.0",
 ]
+hf = [
+    "safetensors>=0.4.5",
+    "transformers>=4.45.0",
+]
 deepspeed = [
     "deepspeed>=0.19.0",
 ]

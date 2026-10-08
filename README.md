@@ -141,46 +141,43 @@ Data and tokenizer assets are not included in the repository. Pass their
 locations through the configuration or command line. Supported pretraining
 and BPB datasets include DCLM, FineWeb, ClimbMix, and OWT.
 
-## Standalone checkpoint loading
+## Hugging Face models
 
-`esm/modeling_esm.py` contains the model classes and the checkpoint loader.
-To publish a model repository, upload the checkpoint, tokenizer assets, and
-this single Python file:
+Export a Lightning checkpoint and its tokenizer to the standard Transformers
+layout:
 
-```text
-model-repository/
-├── modeling_esm.py
-├── model.ckpt
-└── tokenizer/
-    ├── tokenizer.pkl
-    └── token_bytes.pt
+```bash
+uv sync --extra gpu --extra hf
+python -m scripts.export_hf \
+  /path/to/checkpoints/final.ckpt \
+  ./hf-model \
+  --tokenizer-dir /path/to/tokenizer
 ```
 
-Install PyTorch and `tiktoken`, copy `modeling_esm.py` beside the checkpoint,
-and run:
+Upload the contents of `hf-model/` to a model repository. It includes
+`config.json`, `model.safetensors`, `modeling_esm.py`,
+`configuration_esm.py`, and the serialized ESM tokenizer. The optional
+`token_bytes.pt` is retained for BPB evaluation.
+
+Load from the Hub with Transformers:
 
 ```python
 import torch
-from modeling_esm import load_checkpoint
+from transformers import AutoModelForMaskedLM, AutoTokenizer
 
-model, tokenizer, hparams, device = load_checkpoint(
-    "model.ckpt",
-    tokenizer_path="tokenizer",
-)
+repo_id = "your-account/your-esm-model"
+tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
+model = AutoModelForMaskedLM.from_pretrained(repo_id, trust_remote_code=True)
 
-input_ids = torch.tensor(
-    [tokenizer.encode("hello", append=tokenizer.get_bos_token_id())],
-    device=device,
-)
-logits = model(input_ids)
+inputs = tokenizer("hello", return_tensors="pt")
+with torch.no_grad():
+    logits = model(**inputs).logits
 print(logits.shape)
 ```
 
-If the checkpoint and `tokenizer/` directory are siblings, omit
-`tokenizer_path`. `token_bytes.pt` is needed for BPB evaluation; logits-only
-inference only needs `tokenizer.pkl`. The loader accepts the Lightning
-checkpoint format and reconstructs the architecture from its saved
-hyperparameters. It is not a Transformers `PreTrainedModel`.
+The ESM tokenizer prepends its BOS token by default through the standard
+Transformers tokenizer interface. ESM's legacy `load_checkpoint()` API remains
+available for Lightning checkpoints and existing evaluation scripts.
 
 ## Repository layout
 

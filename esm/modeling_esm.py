@@ -16,6 +16,7 @@ hyper-parameters before the state dict is loaded.
 import math
 import os
 import pickle
+import shutil
 import types
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -26,6 +27,22 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
+
+try:
+    from transformers import PreTrainedModel, PreTrainedTokenizer
+    from transformers.modeling_outputs import MaskedLMOutput
+except ImportError:
+    PreTrainedModel = None
+    PreTrainedTokenizer = None
+    MaskedLMOutput = None
+
+try:
+    from .configuration_esm import ESMConfig
+except ImportError:
+    try:
+        from configuration_esm import ESMConfig
+    except ImportError:
+        ESMConfig = None
 
 
 @dataclass
@@ -1483,6 +1500,42 @@ def _normalize_checkpoint_hparams(hparams, tokenizer):
     return hparams
 
 
+def _normalize_legacy_state_dict(state_dict):
+    """Convert Lightning state-dict keys to canonical ESM module keys."""
+
+    normalized = {}
+    for key, value in state_dict.items():
+        if key.startswith("model."):
+            key = key[len("model.") :]
+        key = key.replace("._orig_mod.", ".")
+        if key.startswith("_orig_mod."):
+            key = key[len("_orig_mod.") :]
+        if key == "langevin_dynamics_noise_std":
+            continue
+        normalized[key] = value
+
+    eager_prefix = "transformer_eager."
+    transformer_prefix = "transformer."
+    eager_keys = [key for key in normalized if key.startswith(eager_prefix)]
+    if eager_keys:
+        missing = [
+            key
+            for key in eager_keys
+            if transformer_prefix + key[len(eager_prefix) :] not in normalized
+        ]
+        if missing:
+            raise RuntimeError(
+                "Cannot discard transformer_eager keys without canonical counterparts: "
+                + ", ".join(missing[:5])
+            )
+        normalized = {
+            key: value
+            for key, value in normalized.items()
+            if not key.startswith(eager_prefix)
+        }
+    return normalized
+
+
 def load_checkpoint(
     checkpoint_path: str,
     *,
@@ -1528,36 +1581,7 @@ def load_checkpoint(
     hparams["tokenizer_obj"] = ESMTokenizerWrapper(tokenizer_obj=tokenizer)
     model = ESM_NLP(hparams)
     state_dict = checkpoint.get("state_dict", checkpoint)
-    model_state_dict = {}
-    for key, value in state_dict.items():
-        if key.startswith("model."):
-            key = key[len("model.") :]
-        key = key.replace("._orig_mod.", ".")
-        if key.startswith("_orig_mod."):
-            key = key[len("_orig_mod.") :]
-        if key == "langevin_dynamics_noise_std":
-            continue
-        model_state_dict[key] = value
-
-    eager_prefix = "transformer_eager."
-    transformer_prefix = "transformer."
-    eager_keys = [key for key in model_state_dict if key.startswith(eager_prefix)]
-    if eager_keys:
-        missing = [
-            key
-            for key in eager_keys
-            if transformer_prefix + key[len(eager_prefix) :] not in model_state_dict
-        ]
-        if missing:
-            raise RuntimeError(
-                "Cannot discard transformer_eager keys without canonical counterparts: "
-                + ", ".join(missing[:5])
-            )
-        model_state_dict = {
-            key: value
-            for key, value in model_state_dict.items()
-            if key not in eager_keys
-        }
+    model_state_dict = _normalize_legacy_state_dict(state_dict)
 
     model.load_state_dict(model_state_dict, strict=True)
     model.eval()
@@ -1577,7 +1601,222 @@ def load_checkpoint(
     return wrapped, tokenizer, hparams, resolved_device
 
 
+class _VocabularyOnlyTokenizer:
+    """Tokenizer substitute used when the HF model receives integer IDs."""
+
+    def __init__(self, vocab_size: int):
+        self.vocab_size = int(vocab_size)
+
+    def get_vocab_size(self):
+        return self.vocab_size
+
+
+if ESMConfig is not None and PreTrainedModel is not None and PreTrainedTokenizer is not None:
+
+    class ESMPreTrainedModel(PreTrainedModel):
+        """Shared Transformers base class for ESM models."""
+
+        config_class = ESMConfig
+        base_model_prefix = "esm"
+        main_input_name = "input_ids"
+
+        def _init_weights(self, module):
+            del module
+
+
+    class ESMForMaskedLM(ESMPreTrainedModel):
+        """Hugging Face wrapper exposing ESM token logits."""
+
+        def __init__(self, config):
+            super().__init__(config)
+            hparams = config.to_hparams()
+            hparams["tokenizer_obj"] = _VocabularyOnlyTokenizer(config.vocab_size)
+            self.esm = ESM_NLP(hparams)
+            self.post_init()
+
+        def get_input_embeddings(self):
+            return self.esm.embeddings
+
+        def set_input_embeddings(self, value):
+            self.esm.embeddings = value
+
+        def get_output_embeddings(self):
+            return self.esm.tf_head.proj
+
+        def set_output_embeddings(self, value):
+            self.esm.tf_head.proj = value
+
+        def forward(
+            self,
+            input_ids=None,
+            attention_mask=None,
+            labels=None,
+            output_hidden_states=None,
+            output_attentions=None,
+            return_dict=None,
+            **kwargs,
+        ):
+            del attention_mask, output_attentions, kwargs
+            if input_ids is None:
+                raise ValueError("input_ids must be provided")
+            if input_ids.ndim != 2:
+                raise ValueError(
+                    f"input_ids must have shape [batch, sequence], got {input_ids.shape}"
+                )
+            if return_dict is None:
+                return_dict = self.config.use_return_dict
+
+            _, _, hidden_states = self.esm(
+                input_ids,
+                learning=self.training,
+                return_pred_hiddens=True,
+            )
+            hidden = hidden_states[-1]
+            if hidden is None:
+                raise RuntimeError("ESM did not return the post-update hidden state")
+            logits = self.esm.tf_head(hidden, self.esm.embeddings(input_ids))
+
+            loss = None
+            if labels is not None:
+                loss = F.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)),
+                    labels.reshape(-1),
+                    ignore_index=-100,
+                )
+
+            if not return_dict:
+                output = (logits,)
+                if output_hidden_states:
+                    output = output + ((hidden,),)
+                return ((loss,) + output) if loss is not None else output
+
+            return MaskedLMOutput(
+                loss=loss,
+                logits=logits,
+                hidden_states=(hidden,) if output_hidden_states else None,
+                attentions=None,
+            )
+
+        @classmethod
+        def from_legacy_checkpoint(cls, checkpoint_path, tokenizer_path=None):
+            """Load a Lightning checkpoint into the Transformers wrapper."""
+
+            checkpoint = load_checkpoint_file(checkpoint_path, map_location="cpu")
+            hparams = dict(checkpoint.get("hyper_parameters", {}))
+            tokenizer_dir = resolve_tokenizer_dir(checkpoint_path, tokenizer_path)
+            if tokenizer_dir is None:
+                raise FileNotFoundError(
+                    "No tokenizer directory found next to the checkpoint; "
+                    "pass tokenizer_path explicitly."
+                )
+            tokenizer = get_tokenizer(tokenizer_dir)
+            hparams = _normalize_checkpoint_hparams(hparams, tokenizer)
+            config = ESMConfig.from_legacy_hparams(
+                hparams, vocab_size=tokenizer.get_vocab_size()
+            )
+            model = cls(config)
+            canonical_state = _normalize_legacy_state_dict(
+                checkpoint.get("state_dict", checkpoint)
+            )
+            hf_state = {f"esm.{key}": value for key, value in canonical_state.items()}
+            incompatible = model.load_state_dict(hf_state, strict=False)
+            if incompatible.missing_keys or incompatible.unexpected_keys:
+                raise RuntimeError(
+                    "Legacy checkpoint does not match the ESM Transformers wrapper: "
+                    f"missing={incompatible.missing_keys[:5]}, "
+                    f"unexpected={incompatible.unexpected_keys[:5]}"
+                )
+            return model, tokenizer
+
+
+    class ESMTokenizer(PreTrainedTokenizer):
+        """Transformers tokenizer backed by ESM's serialized RustBPE data."""
+
+        model_input_names = ["input_ids", "attention_mask"]
+        vocab_files_names = {"tokenizer_file": "tokenizer.pkl"}
+
+        def __init__(self, tokenizer_file=None, **kwargs):
+            if tokenizer_file is None:
+                tokenizer_file = "tokenizer.pkl"
+            tokenizer_file = Path(tokenizer_file).expanduser().resolve()
+            self._tokenizer_file = tokenizer_file
+            self._encoding = StandaloneTokenizer.from_directory(tokenizer_file.parent)
+            self._special_ids = {
+                "<|bos|>": self._encoding.bos_token_id,
+                "<|eos|>": self._encoding.eos_token_id,
+                "<|pad|>": self._encoding.pad_token_id,
+                "<|unk|>": 0,
+            }
+            super().__init__(
+                bos_token="<|bos|>",
+                eos_token="<|eos|>",
+                pad_token="<|pad|>",
+                unk_token="<|unk|>",
+                **kwargs,
+            )
+
+        @property
+        def vocab_size(self):
+            return self._encoding.get_vocab_size()
+
+        def get_vocab(self):
+            vocabulary = {str(index): index for index in range(self.vocab_size)}
+            vocabulary.update(self._special_ids)
+            return vocabulary
+
+        def _tokenize(self, text, **kwargs):
+            del kwargs
+            return [str(index) for index in self._encoding.encode(text)]
+
+        def _convert_token_to_id(self, token):
+            if token in self._special_ids:
+                return self._special_ids[token]
+            return int(token)
+
+        def _convert_id_to_token(self, index):
+            return str(index)
+
+        def build_inputs_with_special_tokens(self, token_ids_0, token_ids_1=None):
+            del token_ids_1
+            return [self.bos_token_id] + list(token_ids_0)
+
+        def _decode(
+            self,
+            token_ids,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=True,
+            **kwargs,
+        ):
+            del clean_up_tokenization_spaces, kwargs
+            token_ids = [int(token_id) for token_id in token_ids]
+            if skip_special_tokens:
+                token_ids = [
+                    token_id
+                    for token_id in token_ids
+                    if token_id not in self._special_ids.values()
+                ]
+            return self._encoding.decode(token_ids)
+
+        def save_vocabulary(self, save_directory, filename_prefix=None):
+            del filename_prefix
+            save_directory = Path(save_directory)
+            save_directory.mkdir(parents=True, exist_ok=True)
+            target = save_directory / "tokenizer.pkl"
+            shutil.copyfile(self._tokenizer_file, target)
+            return (str(target),)
+
+else:
+    ESMConfig = None
+    ESMPreTrainedModel = None
+    ESMForMaskedLM = None
+    ESMTokenizer = None
+
+
 __all__ = [
+    "ESMConfig",
+    "ESMPreTrainedModel",
+    "ESMForMaskedLM",
+    "ESMTokenizer",
     "ESMModelArgs",
     "ESMInferenceWrapper",
     "load_checkpoint",
