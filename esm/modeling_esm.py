@@ -45,6 +45,36 @@ except ImportError:
         ESMConfig = None
 
 
+def sample_top_p(probs: torch.Tensor, p: float) -> torch.Tensor:
+    """Sample from a batch of probability distributions with nucleus sampling."""
+
+    probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
+    cumulative = torch.cumsum(probs_sort, dim=-1)
+    probs_sort[cumulative - probs_sort > p] = 0.0
+    probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
+    return torch.gather(probs_idx, -1, torch.multinomial(probs_sort, 1))
+
+
+def call_model_forward_decode(hparams, model, input_tokens, start_pos=0, bsz=None):
+    """Run ESM on the supplied prefix and return vocabulary logits.
+
+    Callers that pass the full prefix on each decoding iteration must keep
+    ``start_pos=0`` because this model does not cache prior key/value states.
+    """
+
+    del hparams, bsz
+    _, _, pred_hiddens = model.forward(
+        input_tokens,
+        start_pos=start_pos,
+        learning=False,
+        return_pred_hiddens=True,
+    )
+    pred_hidden = pred_hiddens[-1]
+    if pred_hidden is None:
+        raise RuntimeError("ESM returned no post-update hidden state.")
+    return model.tf_head(pred_hidden, model.embeddings(input_tokens))
+
+
 @dataclass
 class ESMModelArgs:
     """Architecture arguments persisted indirectly through checkpoint hparams."""
@@ -1051,7 +1081,9 @@ class ESM_NLP(_ESMModule):
             raise ValueError("NaN or Inf gradients detected during ESM MCMC.")
 
         alpha = torch.clamp(self.alpha, min=0.0001).float()
-        predicted_tokens = predicted_tokens - alpha * predicted_tokens_grad
+        predicted_tokens = (predicted_tokens - alpha * predicted_tokens_grad).to(
+            dtype=all_embeddings.dtype
+        )
 
         pred_hidden = None
         if compute_pred_hidden:
@@ -1172,7 +1204,7 @@ class ESM_NLP(_ESMModule):
                 device=self.device,
             )
             * noise_scale
-        )
+        ).to(dtype=embeddings.dtype)
 
     def warm_up_finished(self):
         self.finished_warming_up = True
@@ -1483,6 +1515,59 @@ def _resolve_dtype(torch, dtype: str | Any, device) -> Any:
     return torch.bfloat16 if device.type == "cuda" else torch.float32
 
 
+def _is_huggingface_source(source: str | os.PathLike[str]) -> bool:
+    """Return whether a source points to a Transformers model or Hub ID."""
+
+    source_path = Path(os.fspath(source)).expanduser()
+    if source_path.is_dir():
+        return (source_path / "config.json").is_file()
+    if source_path.exists():
+        return False
+    return not str(source).lower().endswith((".ckpt", ".pt", ".pth"))
+
+
+def _load_huggingface_checkpoint(
+    source: str | os.PathLike[str],
+    *,
+    device,
+    dtype,
+    tokenizer_path: str | os.PathLike[str] | None = None,
+):
+    """Load a Transformers model and expose the legacy inference interface."""
+
+    hf_model_class = globals().get("ESMForMaskedLM")
+    hf_tokenizer_class = globals().get("ESMTokenizer")
+    if hf_model_class is None or hf_tokenizer_class is None:
+        raise ImportError(
+            "Loading a Hugging Face ESM model requires the optional dependencies. "
+            "Install them with `uv sync --extra hf --extra gpu` or `--extra cpu`."
+        )
+
+    model = hf_model_class.from_pretrained(os.fspath(source))
+    tokenizer_source = tokenizer_path or source
+    tokenizer = hf_tokenizer_class.from_pretrained(os.fspath(tokenizer_source))
+    legacy_tokenizer = tokenizer._encoding
+
+    model = model.to(device=device, dtype=dtype)
+    model.eval()
+    model.esm.eval()
+
+    hparams = model.config.to_hparams()
+    hparams["tokenizer_dir"] = os.fspath(tokenizer_source)
+    wrapper = ESMInferenceWrapper(
+        model.esm,
+        ESMTokenizerWrapper(tokenizer_obj=legacy_tokenizer),
+        device,
+        max_seq_len=int(hparams.get("context_length", 256)),
+    )
+    print(
+        f"[checkpoint] loaded Hugging Face model={hparams.get('model_name', 'esm')} "
+        f"size={hparams.get('model_size', 'unknown')} "
+        f"context={hparams.get('context_length', 256)}"
+    )
+    return wrapper, legacy_tokenizer, hparams, device
+
+
 def _normalize_checkpoint_hparams(hparams, tokenizer):
     hparams = dict(hparams)
     if hparams.get("time_embedding") is None:
@@ -1493,6 +1578,7 @@ def _normalize_checkpoint_hparams(hparams, tokenizer):
         hparams["esm_act_func"] = hparams.get("ebt_act_func") or "silu"
     if not hparams.get("vocab_size"):
         hparams["vocab_size"] = tokenizer.get_vocab_size()
+    hparams.setdefault("float_precision", "32-true")
     hparams.setdefault("weight_initialization_method", "xavier")
     hparams.setdefault("weight_initialization_gain", 1.0)
     hparams.setdefault("gradient_checkpointing", False)
@@ -1537,23 +1623,39 @@ def _normalize_legacy_state_dict(state_dict):
 
 
 def load_checkpoint(
-    checkpoint_path: str,
+    checkpoint_path: str | os.PathLike[str],
     *,
     device: str | Any = "auto",
     dtype: str | Any = "auto",
     tokenizer_path: str | None = None,
 ):
-    """Return ``(model, tokenizer, hparams, device)`` for an ESM checkpoint.
+    """Load a Lightning checkpoint or Transformers model.
 
-    ``tokenizer_path`` points to the directory containing ``tokenizer.pkl``
-    and ``token_bytes.pt``. If omitted, a ``tokenizer`` directory next to the
-    checkpoint is used.
+    The return value is ``(model, tokenizer, hparams, device)``. ``model`` is
+    always an :class:`ESMInferenceWrapper`, so chat and evaluation code can use
+    the same interface for all supported model sources. ``checkpoint_path``
+    may be a Lightning ``.ckpt`` file, a local Transformers directory, or a
+    Hugging Face Hub model ID.
+
+    For a Lightning checkpoint, ``tokenizer_path`` points to the directory
+    containing ``tokenizer.pkl`` and ``token_bytes.pt``. If omitted, a
+    ``tokenizer`` directory next to the checkpoint is used. For a Transformers
+    source, the tokenizer is loaded from the model source unless an explicit
+    ``tokenizer_path`` is provided.
     """
 
     import torch
 
     resolved_device = _resolve_device(torch, device)
     resolved_dtype = _resolve_dtype(torch, dtype, resolved_device)
+    if _is_huggingface_source(checkpoint_path):
+        return _load_huggingface_checkpoint(
+            checkpoint_path,
+            device=resolved_device,
+            dtype=resolved_dtype,
+            tokenizer_path=tokenizer_path,
+        )
+
     print(
         f"[checkpoint] loading {checkpoint_path} on {resolved_device} ({resolved_dtype})"
     )
@@ -1579,6 +1681,12 @@ def load_checkpoint(
     tokenizer = get_tokenizer(tokenizer_dir=tokenizer_dir)
     hparams = _normalize_checkpoint_hparams(hparams, tokenizer)
     hparams["tokenizer_obj"] = ESMTokenizerWrapper(tokenizer_obj=tokenizer)
+    if resolved_dtype == torch.bfloat16:
+        hparams["float_precision"] = "bf16-true"
+    elif resolved_dtype == torch.float16:
+        hparams["float_precision"] = "16-mixed"
+    else:
+        hparams["float_precision"] = "32-true"
     model = ESM_NLP(hparams)
     state_dict = checkpoint.get("state_dict", checkpoint)
     model_state_dict = _normalize_legacy_state_dict(state_dict)
@@ -1666,23 +1774,37 @@ if ESMConfig is not None and PreTrainedModel is not None and PreTrainedTokenizer
             if return_dict is None:
                 return_dict = self.config.use_return_dict
 
-            _, _, hidden_states = self.esm(
-                input_ids,
-                learning=self.training,
-                return_pred_hiddens=True,
-            )
-            hidden = hidden_states[-1]
-            if hidden is None:
-                raise RuntimeError("ESM did not return the post-update hidden state")
-            logits = self.esm.tf_head(hidden, self.esm.embeddings(input_ids))
-
-            loss = None
-            if labels is not None:
-                loss = F.cross_entropy(
-                    logits.reshape(-1, logits.size(-1)),
-                    labels.reshape(-1),
-                    ignore_index=-100,
+            parameter = next(self.parameters())
+            use_autocast = parameter.device.type == "cuda" and parameter.dtype in {
+                torch.float16,
+                torch.bfloat16,
+            }
+            autocast_context = (
+                torch.autocast(
+                    device_type=parameter.device.type,
+                    dtype=parameter.dtype,
                 )
+                if use_autocast
+                else nullcontext()
+            )
+            with autocast_context:
+                _, _, hidden_states = self.esm(
+                    input_ids,
+                    learning=self.training,
+                    return_pred_hiddens=True,
+                )
+                hidden = hidden_states[-1]
+                if hidden is None:
+                    raise RuntimeError("ESM did not return the post-update hidden state")
+                logits = self.esm.tf_head(hidden, self.esm.embeddings(input_ids))
+
+                loss = None
+                if labels is not None:
+                    loss = F.cross_entropy(
+                        logits.reshape(-1, logits.size(-1)),
+                        labels.reshape(-1),
+                        ignore_index=-100,
+                    )
 
             if not return_dict:
                 output = (logits,)
@@ -1735,6 +1857,15 @@ if ESMConfig is not None and PreTrainedModel is not None and PreTrainedTokenizer
         model_input_names = ["input_ids", "attention_mask"]
         vocab_files_names = {"tokenizer_file": "tokenizer.pkl"}
 
+        @classmethod
+        def from_pretrained(cls, pretrained_model_name_or_path, *init_inputs, **kwargs):
+            model_path = Path(str(pretrained_model_name_or_path)).expanduser()
+            if model_path.is_dir() and "tokenizer_file" not in kwargs:
+                kwargs["tokenizer_file"] = str(model_path / "tokenizer.pkl")
+            return super().from_pretrained(
+                pretrained_model_name_or_path, *init_inputs, **kwargs
+            )
+
         def __init__(self, tokenizer_file=None, **kwargs):
             if tokenizer_file is None:
                 tokenizer_file = "tokenizer.pkl"
@@ -1747,11 +1878,14 @@ if ESMConfig is not None and PreTrainedModel is not None and PreTrainedTokenizer
                 "<|pad|>": self._encoding.pad_token_id,
                 "<|unk|>": 0,
             }
+            special_tokens = {
+                "bos_token": kwargs.pop("bos_token", "<|bos|>"),
+                "eos_token": kwargs.pop("eos_token", "<|eos|>"),
+                "pad_token": kwargs.pop("pad_token", "<|pad|>"),
+                "unk_token": kwargs.pop("unk_token", "<|unk|>"),
+            }
             super().__init__(
-                bos_token="<|bos|>",
-                eos_token="<|eos|>",
-                pad_token="<|pad|>",
-                unk_token="<|unk|>",
+                **special_tokens,
                 **kwargs,
             )
 

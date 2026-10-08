@@ -97,7 +97,7 @@ class ESMConfig(PretrainedConfig):
             {
                 "AutoConfig": "configuration_esm.ESMConfig",
                 "AutoModelForMaskedLM": "modeling_esm.ESMForMaskedLM",
-                "AutoTokenizer": "modeling_esm.ESMTokenizer",
+                "AutoTokenizer": ["modeling_esm.ESMTokenizer", None],
             },
         )
         kwargs.setdefault("tie_word_embeddings", False)

@@ -60,10 +60,10 @@ def main():
     tokenizer_config.update(
         {
             "tokenizer_class": "ESMTokenizer",
-            "auto_map": {"AutoTokenizer": "modeling_esm.ESMTokenizer"},
-            "tokenizer_file": "tokenizer.pkl",
+            "auto_map": {"AutoTokenizer": ["modeling_esm.ESMTokenizer", None]},
         }
     )
+    tokenizer_config.pop("tokenizer_file", None)
     tokenizer_config_path.write_text(
         json.dumps(tokenizer_config, indent=2, sort_keys=True) + "\n"
     )

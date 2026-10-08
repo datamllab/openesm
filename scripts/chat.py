@@ -6,18 +6,22 @@ Examples:
     python -m scripts.chat --show-mcmc
     python -m scripts.chat --show-mcmc --verbose
     python -m scripts.chat -c /path/to/checkpoint
+    python -m scripts.chat --web -c /path/to/checkpoint --port 8000
 """
 
 import argparse
+import asyncio
+import json
+import queue
 import sys
 import os
 import time
 import torch
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 from esm.config import bootstrap_assets
-from esm.generate import call_model_forward_decode, sample_top_p
+from esm.modeling_esm import call_model_forward_decode, sample_top_p
 
 
 for var in ["RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT"]:
@@ -26,7 +30,6 @@ for var in ["RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT"]:
 
 
 os.environ["ESM_OFFLINE_MODE"] = "1"
-os.environ["HF_HUB_OFFLINE"] = "1"
 
 
 def _bootstrap_assets() -> None:
@@ -65,14 +68,14 @@ def print_banner():
     banner = """
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║                                                                              ║
-║   ███████╗██████╗ ████████╗     ██████╗██╗  ██╗ █████╗ ████████╗             ║
-║   ██╔════╝██╔══██╗╚══██╔══╝    ██╔════╝██║  ██║██╔══██╗╚══██╔══╝             ║
-║   █████╗  ██████╔╝   ██║       ██║     ███████║███████║   ██║                ║
-║   ██╔══╝  ██╔══██╗   ██║       ██║     ██╔══██║██╔══██║   ██║                ║
-║   ███████╗██████╔╝   ██║       ╚██████╗██║  ██║██║  ██║   ██║                ║
-║   ╚══════╝╚═════╝    ╚═╝        ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝                ║
+║      ███████╗ ██████╗ ███╗   ███╗     ██████╗ ██╗  ██╗ █████╗ ████████╗   ║
+║      ██╔════╝██╔════╝ ████╗ ████║    ██╔════╝ ██║  ██║██╔══██╗╚══██╔══╝   ║
+║      █████╗  ╚█████╗  ██╔████╔██║    ██║      ███████║███████║   ██║      ║
+║      ██╔══╝   ╚═══██╗ ██║╚██╔╝██║    ██║      ██╔══██║██╔══██║   ██║      ║
+║      ███████╗██████╔╝ ██║ ╚═╝ ██║    ╚██████╗ ██║  ██║██║  ██║   ██║      ║
+║      ╚══════╝╚═════╝  ╚═╝     ╚═╝     ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝      ║
 ║                                                                              ║
-║           Energy-Based Transformer Interactive Chat Terminal                 ║
+║                         ESM Chat Terminal                                   ║
 ║                                                                              ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
@@ -136,14 +139,41 @@ class ESMChatEngine:
 
     def _print_model_info(self):
         """Print model metadata."""
+        info = self.get_model_info()
+
+        print()
+        print(f"  {Colors.BOLD}Model configuration:{Colors.RESET}")
+        print(f"    - Embedding dimension: {info['embedding_dim']}")
+        print(f"    - Layers: {info['num_layers']}")
+        print(f"    - Attention heads: {info['num_heads']}")
+        print(f"    - MCMC steps: {info['mcmc_steps']}")
+        print(f"    - MCMC step size (alpha): {info['alpha']}")
+        print(f"    - Context length: {info['context_length']}")
+        print()
+
+    def get_model_info(self) -> Dict[str, Any]:
+        """Return model metadata for the terminal and web interfaces."""
+
         embed_dim = getattr(
             self.hparams, "embedding_dim", getattr(self.hparams, "dim", "unknown")
         )
         n_layers = getattr(
-            self.hparams, "num_layers", getattr(self.hparams, "n_layers", "unknown")
+            self.hparams,
+            "num_layers",
+            getattr(
+                self.hparams,
+                "num_transformer_blocks",
+                getattr(self.hparams, "n_layers", "unknown"),
+            ),
         )
         n_heads = getattr(
-            self.hparams, "num_heads", getattr(self.hparams, "n_heads", "unknown")
+            self.hparams,
+            "num_heads",
+            getattr(
+                self.hparams,
+                "multiheaded_attention_heads",
+                getattr(self.hparams, "n_heads", "unknown"),
+            ),
         )
         mcmc_steps = getattr(self.hparams, "mcmc_num_steps", "unknown")
         ctx_len = getattr(
@@ -158,157 +188,190 @@ class ESMChatEngine:
                 else self.model.alpha
             )
 
-        print()
-        print(f"  {Colors.BOLD}Model configuration:{Colors.RESET}")
-        print(f"    - Embedding dimension: {embed_dim}")
-        print(f"    - Layers: {n_layers}")
-        print(f"    - Attention heads: {n_heads}")
-        print(f"    - MCMC steps: {mcmc_steps}")
+        if isinstance(alpha_val, (float, int)):
+            alpha_val = float(alpha_val)
+        return {
+            "embedding_dim": embed_dim,
+            "num_layers": n_layers,
+            "num_heads": n_heads,
+            "mcmc_steps": mcmc_steps,
+            "alpha": alpha_val,
+            "context_length": ctx_len,
+            "show_mcmc": self.show_mcmc,
+            "verbose": self.verbose,
+            "show_energy": self.show_energy,
+            "show_distribution": self.show_distribution,
+        }
 
-        if isinstance(alpha_val, float):
-            print(f"    - MCMC step size (alpha): {alpha_val:.6f}")
-        else:
-            print(f"    - MCMC step size (alpha): {alpha_val}")
+    def _tokenizer_core(self):
+        return getattr(self.tokenizer, "tokenizer", self.tokenizer)
 
-        print(f"    - Context length: {ctx_len}")
-        print()
+    def _decode(self, token_ids: Iterable[int]) -> str:
+        try:
+            return self.tokenizer.decode(
+                list(token_ids), skip_special_tokens=True
+            )
+        except TypeError:
+            return self.tokenizer.decode(list(token_ids))
+
+    def _build_prompt_tokens(
+        self,
+        prompt: Optional[str] = None,
+        messages: Optional[List[Dict[str, str]]] = None,
+    ) -> List[int]:
+        if messages is None:
+            if prompt is None:
+                raise ValueError("Either prompt or messages must be provided")
+            messages = [{"role": "user", "content": prompt}]
+        if not messages:
+            raise ValueError("messages must contain at least one message")
+
+        tokenizer = self._tokenizer_core()
+        if hasattr(tokenizer, "encode_special"):
+            prompt_tokens = [tokenizer.get_bos_token_id()]
+            for message in messages:
+                role = message.get("role")
+                content = message.get("content", "")
+                if role == "user":
+                    prompt_tokens.extend(
+                        [
+                            tokenizer.encode_special("<|user_start|>"),
+                            *tokenizer.encode(content),
+                            tokenizer.encode_special("<|user_end|>"),
+                        ]
+                    )
+                elif role == "assistant":
+                    prompt_tokens.extend(
+                        [
+                            tokenizer.encode_special("<|assistant_start|>"),
+                            *tokenizer.encode(content),
+                            tokenizer.encode_special("<|assistant_end|>"),
+                        ]
+                    )
+                else:
+                    raise ValueError(f"Unsupported chat role: {role!r}")
+            if messages[-1].get("role") != "user":
+                raise ValueError("The final chat message must be from the user")
+            prompt_tokens.append(tokenizer.encode_special("<|assistant_start|>"))
+            return prompt_tokens
+
+        last_user = next(
+            (message.get("content", "") for message in reversed(messages)
+             if message.get("role") == "user"),
+            "",
+        )
+        encoded = self.tokenizer.encode(last_user)
+        prompt_tokens = encoded if isinstance(encoded, list) else encoded.tolist()
+        bos_id = getattr(self.tokenizer, "bos_token_id", None)
+        if bos_id is not None and (not prompt_tokens or prompt_tokens[0] != bos_id):
+            prompt_tokens.insert(0, bos_id)
+        return prompt_tokens
+
+    def generate_stream(
+        self,
+        prompt: Optional[str] = None,
+        messages: Optional[List[Dict[str, str]]] = None,
+        max_tokens: int = 256,
+        temperature: float = 0.8,
+        top_p: float = 0.9,
+        stop_tokens: Optional[List[int]] = None,
+    ):
+        """Yield generated text for a prompt or a complete chat history."""
+
+        prompt_tokens = self._build_prompt_tokens(prompt, messages)
+        pad_id = getattr(self.tokenizer, "bos_token_id", None)
+        if pad_id is None:
+            pad_id = getattr(self.tokenizer, "eos_token_id", 0)
+
+        context_length = int(
+            getattr(self.hparams, "context_length", getattr(self.hparams, "max_seq_len", 2048))
+        )
+        if len(prompt_tokens) >= context_length:
+            raise ValueError(
+                f"Chat history has {len(prompt_tokens)} tokens, but the model "
+                f"context length is {context_length}."
+            )
+        max_tokens = min(max(int(max_tokens), 1), context_length - len(prompt_tokens))
+
+        tokens = torch.full(
+            (1, len(prompt_tokens) + max_tokens),
+            pad_id,
+            dtype=torch.long,
+            device=self.device,
+        )
+        tokens[0, : len(prompt_tokens)] = torch.tensor(
+            prompt_tokens, dtype=torch.long, device=self.device
+        )
+        input_text_mask = torch.zeros_like(tokens, dtype=torch.bool)
+        input_text_mask[0, : len(prompt_tokens)] = True
+
+        tokenizer = self._tokenizer_core()
+        stop_token_ids = set(stop_tokens or [])
+        if hasattr(tokenizer, "encode_special"):
+            stop_token_ids.add(tokenizer.encode_special("<|assistant_end|>"))
+        if not stop_token_ids:
+            stop_token_ids.add(pad_id)
+
+        eos_reached = False
+        with torch.no_grad():
+            for cur_pos in range(len(prompt_tokens), tokens.shape[1]):
+                logits = call_model_forward_decode(
+                    self.hparams, self.model, tokens[:, :cur_pos], start_pos=0, bsz=1
+                )
+                if temperature > 0:
+                    probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
+                    next_token = sample_top_p(probs, top_p)
+                else:
+                    next_token = torch.argmax(logits[:, -1], dim=-1)
+                next_token = next_token.reshape(-1)
+                next_token = torch.where(
+                    input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token
+                )
+                tokens[:, cur_pos] = next_token
+                token_id = int(next_token.item())
+                if token_id in stop_token_ids:
+                    eos_reached = True
+                else:
+                    token_text = self._decode([token_id])
+                    if token_text:
+                        yield token_text
+                if eos_reached:
+                    break
 
     def generate(
         self,
-        prompt: str,
+        prompt: Optional[str] = None,
+        messages: Optional[List[Dict[str, str]]] = None,
         max_tokens: int = 256,
         temperature: float = 0.8,
         top_p: float = 0.9,
         stop_tokens: Optional[List[int]] = None,
         stream: bool = True,
     ) -> Tuple[str, Dict[str, Any]]:
-        """Generate text using the shared generation helpers."""
+        """Generate text from one prompt or a multi-turn chat history."""
 
-        inner_tok = getattr(self.tokenizer, "tokenizer", None)
-        if inner_tok is not None and hasattr(inner_tok, "encode_special"):
-            bos_id = inner_tok.get_bos_token_id()
-            user_start = inner_tok.encode_special("<|user_start|>")
-            user_end = inner_tok.encode_special("<|user_end|>")
-            asst_start = inner_tok.encode_special("<|assistant_start|>")
-            content_ids = inner_tok.encode(prompt)
-            prompt_tokens_list = (
-                [bos_id, user_start] + content_ids + [user_end, asst_start]
-            )
-        else:
-            encoded = self.tokenizer.encode(prompt)
-            prompt_tokens_list = (
-                encoded if isinstance(encoded, list) else encoded.tolist()
-            )
-            bos_id = getattr(self.tokenizer, "bos_token_id", None)
-            if bos_id is not None and (
-                not prompt_tokens_list or prompt_tokens_list[0] != bos_id
-            ):
-                prompt_tokens_list = [bos_id] + prompt_tokens_list
-
-        if (
-            hasattr(self.tokenizer, "bos_token_id")
-            and self.tokenizer.bos_token_id is not None
-        ):
-            pad_id = self.tokenizer.bos_token_id
-        elif (
-            hasattr(self.tokenizer, "eos_token_id")
-            and self.tokenizer.eos_token_id is not None
-        ):
-            pad_id = self.tokenizer.eos_token_id
-        else:
-            pad_id = 0
-
-        bsz = 1
-        min_prompt_len = len(prompt_tokens_list)
-        max_prompt_len = len(prompt_tokens_list)
-
-        ctx_len = getattr(
-            self.hparams, "context_length", getattr(self.hparams, "max_seq_len", 2048)
-        )
-        total_len = min(ctx_len, max_tokens + max_prompt_len)
-
-        tokens = torch.full(
-            (bsz, total_len), pad_id, dtype=torch.long, device=self.device
-        )
-        tokens[0, : len(prompt_tokens_list)] = torch.tensor(
-            prompt_tokens_list, dtype=torch.long, device=self.device
-        )
-
-        input_text_mask = torch.zeros(
-            bsz, total_len, dtype=torch.bool, device=self.device
-        )
-        input_text_mask[0, : len(prompt_tokens_list)] = True
-
-        prev_pos = 0
-        eos_reached = torch.tensor([False] * bsz, device=self.device)
         start_time = time.time()
+        pieces = []
+        for token_text in self.generate_stream(
+            prompt=prompt,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            stop_tokens=stop_tokens,
+        ):
+            pieces.append(token_text)
+            if stream:
+                print(token_text, end="", flush=True)
 
-        stop_token_ids = set()
-        inner_tok = getattr(self.tokenizer, "tokenizer", None)
-        if inner_tok is not None and hasattr(inner_tok, "encode_special"):
-            asst_end_id = inner_tok.encode_special("<|assistant_end|>")
-            if asst_end_id is not None:
-                stop_token_ids.add(asst_end_id)
-
-        if not stop_token_ids:
-            stop_token_ids.add(pad_id)
-
-        with torch.no_grad():
-            if min_prompt_len == total_len:
-                logits = call_model_forward_decode(
-                    self.hparams, self.model, tokens, prev_pos, bsz
-                )
-
-            for cur_pos in range(min_prompt_len, total_len):
-                input_tokens = tokens[:, :cur_pos]
-
-                logits = call_model_forward_decode(
-                    self.hparams, self.model, input_tokens, prev_pos, bsz
-                )
-
-                if temperature > 0:
-                    probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
-                    next_token = sample_top_p(probs, top_p)
-                else:
-                    next_token = torch.argmax(logits[:, -1], dim=-1)
-
-                next_token = next_token.reshape(-1)
-
-                next_token = torch.where(
-                    input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token
-                )
-                tokens[:, cur_pos] = next_token
-
-                if stream and cur_pos >= min_prompt_len:
-                    token_text = self.tokenizer.decode(
-                        [next_token.item()], skip_special_tokens=True
-                    )
-                    print(token_text, end="", flush=True)
-
-                is_stop = torch.zeros(bsz, dtype=torch.bool, device=self.device)
-                for sid in stop_token_ids:
-                    is_stop |= next_token == sid
-                eos_reached |= (~input_text_mask[:, cur_pos]) & is_stop
-                prev_pos = cur_pos
-
-                if all(eos_reached):
-                    break
-
-        toks = tokens[0].tolist()
-        start = len(prompt_tokens_list)
-        toks = toks[start : len(prompt_tokens_list) + max_tokens]
-
-        for sid in stop_token_ids:
-            if sid in toks:
-                toks = toks[: toks.index(sid)]
-
-        generated_text = self.tokenizer.decode(toks, skip_special_tokens=True)
+        generated_text = "".join(pieces)
+        elapsed = time.time() - start_time
 
         stats = {
-            "tokens_generated": len(toks),
-            "total_time": time.time() - start_time,
-            "tokens_per_second": len(toks) / (time.time() - start_time)
-            if (time.time() - start_time) > 0
+            "tokens_generated": len(self._tokenizer_core().encode(generated_text)),
+            "total_time": elapsed,
+            "tokens_per_second": len(self._tokenizer_core().encode(generated_text)) / elapsed
+            if elapsed > 0
             else 0,
             "avg_energy_change": 0,
             "avg_token_prob": 0,
@@ -364,6 +427,423 @@ def print_generation_stats(stats: Dict[str, Any]):
     print()
 
 
+def _handle_web_command(
+    command: str,
+    engine: ESMChatEngine,
+    runtime: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Apply a terminal-style command and return a JSON-safe response."""
+
+    parts = command.strip().split()
+    if not parts:
+        return {"ok": False, "message": "Empty command"}
+
+    name = parts[0].lower()
+    if name == "/temperature":
+        name = "/temp"
+    if name in {"/help", "help"}:
+        return {"result": (
+            "Available commands:\n"
+            "  /temp [value]     - Show or set temperature (0.0-2.0)\n"
+            "  /topp [value]     - Show or set Top-P (0.0-1.0)\n"
+            "  /tokens [value]   - Show or set maximum tokens (1-4096)\n"
+            "  /mcmc             - Toggle MCMC display\n"
+            "  /verbose          - Toggle verbose mode\n"
+            "  /energy           - Toggle energy display\n"
+            "  /status           - Show current settings\n"
+            "  /info             - Show model information\n"
+            "  /clear            - Clear conversation history\n"
+            "  /help             - Show this help"
+        )}
+    if name == "/clear":
+        return {"result": "Conversation cleared.", "action": "clear"}
+    if name in {"/quit", "/exit"}:
+        return {"result": "Close this page to exit web chat."}
+    if name in {"/status", "status"}:
+        info = engine.get_model_info()
+        return {"result": (
+            f"Current settings:\n  Temperature: {runtime['temperature']}\n"
+            f"  Top-P: {runtime['top_p']}\n"
+            f"  Maximum tokens: {runtime['max_tokens']}\n"
+            f"  Show MCMC: {'yes' if info['show_mcmc'] else 'no'}\n"
+            f"  Verbose mode: {'yes' if info['verbose'] else 'no'}\n"
+            f"  Show energy: {'yes' if info['show_energy'] else 'no'}"
+        )}
+    if name in {"/info", "info"}:
+        info = engine.get_model_info()
+        return {"result": (
+            f"Model configuration:\n  Embedding dimension: {info['embedding_dim']}\n"
+            f"  Layers: {info['num_layers']}\n  Attention heads: {info['num_heads']}\n"
+            f"  MCMC steps: {info['mcmc_steps']}\n"
+            f"  MCMC step size (alpha): {info['alpha']}\n"
+            f"  Context length: {info['context_length']}"
+        )}
+    if name in {"/mcmc", "mcmc"}:
+        engine.show_mcmc = not engine.show_mcmc
+        return {"result": f"✓ MCMC display {'enabled' if engine.show_mcmc else 'disabled'}"}
+    if name in {"/verbose", "verbose"}:
+        engine.verbose = not engine.verbose
+        return {"result": f"✓ Verbose mode {'enabled' if engine.verbose else 'disabled'}"}
+    if name in {"/energy", "energy"}:
+        engine.show_energy = not engine.show_energy
+        return {"result": f"✓ Energy display {'enabled' if engine.show_energy else 'disabled'}"}
+
+    if name in {"/temp", "temp"}:
+        if len(parts) < 2:
+            return {"result": f"Current temperature: {runtime['temperature']}"}
+        try:
+            value = float(parts[1])
+        except ValueError:
+            return {"result": "✗ Invalid temperature value", "error": True}
+        if not 0 <= value <= 2:
+            return {"result": "✗ Temperature must be between 0.0 and 2.0", "error": True}
+        runtime["temperature"] = value
+        return {"result": f"✓ Temperature set to {value}"}
+
+    if name in {"/topp", "topp"}:
+        if len(parts) < 2:
+            return {"result": f"Current Top-P: {runtime['top_p']}"}
+        try:
+            value = float(parts[1])
+        except ValueError:
+            return {"result": "✗ Invalid Top-P value", "error": True}
+        if not 0 <= value <= 1:
+            return {"result": "✗ Top-P must be between 0.0 and 1.0", "error": True}
+        runtime["top_p"] = value
+        return {"result": f"✓ Top-P set to {value}"}
+
+    if name in {"/tokens", "tokens"}:
+        if len(parts) < 2:
+            return {"result": f"Current maximum tokens: {runtime['max_tokens']}"}
+        try:
+            value = int(parts[1])
+        except ValueError:
+            return {"result": "✗ Invalid token limit", "error": True}
+        if not 1 <= value <= 4096:
+            return {"result": "✗ Maximum tokens must be between 1 and 4096", "error": True}
+        runtime["max_tokens"] = value
+        return {"result": f"✓ Maximum tokens set to {value}"}
+
+    return {"result": f"Unknown command: {name}. Enter /help to list available commands.", "error": True}
+
+
+def run_web(
+    engine: ESMChatEngine,
+    host: str,
+    port: int,
+    temperature: float,
+    top_p: float,
+    max_tokens: int,
+) -> None:
+    """Run the browser UI and streaming chat endpoint."""
+
+    try:
+        from fastapi import FastAPI
+        from fastapi.middleware.cors import CORSMiddleware
+        from fastapi.responses import HTMLResponse, StreamingResponse
+        from pydantic import BaseModel
+        import uvicorn
+    except ImportError as exc:
+        raise ImportError(
+            "Web chat requires the optional dependencies. "
+            "Install them with `uv sync --extra web`."
+        ) from exc
+
+    class ChatMessage(BaseModel):
+        role: str
+        content: str
+
+    class ChatRequest(BaseModel):
+        messages: List[ChatMessage]
+        temperature: Optional[float] = None
+        top_p: Optional[float] = None
+        max_tokens: Optional[int] = None
+
+    class CommandRequest(BaseModel):
+        command: str
+
+    app = FastAPI(title="ESM Chat")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    runtime = {
+        "temperature": float(temperature),
+        "top_p": float(top_p),
+        "max_tokens": int(max_tokens),
+    }
+    generation_lock = asyncio.Lock()
+    page = r"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>ESM Chat</title>
+    <style>
+        :root { color-scheme: light; }
+        * { box-sizing: border-box; }
+        html, body { height: 100%; margin: 0; }
+        body {
+            font-family: ui-sans-serif, -apple-system, system-ui, "Segoe UI", Helvetica, Arial, sans-serif;
+            background-color: #ffffff; color: #111827;
+            min-height: 100dvh; display: flex; flex-direction: column;
+        }
+        .header { background-color: #ffffff; padding: 1rem 1.5rem; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #f3f4f6; }
+        .header-left { display: flex; align-items: center; gap: 0.75rem; }
+        .header h1 { font-size: 1.25rem; font-weight: 600; margin: 0; color: #111827; }
+        .header-tag { font-size: 0.7rem; background: #eef2ff; color: #4f46e5; padding: 0.15rem 0.5rem; border-radius: 0.25rem; font-weight: 500; }
+        .new-btn { width: 32px; height: 32px; padding: 0; border: 1px solid #e5e7eb; border-radius: 0.5rem; background: #fff; color: #6b7280; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
+        .new-btn:hover { background: #f3f4f6; border-color: #d1d5db; color: #374151; }
+        .chat-container { flex: 1; overflow-y: auto; background: #ffffff; }
+        .chat-wrapper { max-width: 48rem; margin: 0 auto; padding: 2rem 1.5rem 3rem; display: flex; flex-direction: column; gap: 0.75rem; }
+        .message { display: flex; margin-bottom: 0.5rem; color: #0d0d0d; }
+        .message.assistant { justify-content: flex-start; }
+        .message.user { justify-content: flex-end; }
+        .message-content { white-space: pre-wrap; line-height: 1.6; max-width: 100%; }
+        .message.assistant .message-content { background: transparent; border: none; cursor: pointer; border-radius: 0.5rem; padding: 0.5rem; margin-left: -0.5rem; transition: background-color 0.2s; }
+        .message.assistant .message-content:hover { background: #f9fafb; }
+        .message.user .message-content { background-color: #f3f4f6; border-radius: 1.25rem; padding: 0.8rem 1rem; max-width: 65%; cursor: pointer; transition: background-color 0.2s; }
+        .message.user .message-content:hover { background-color: #e5e7eb; }
+        .message.console .message-content { font-family: 'Monaco','Menlo','Consolas','Courier New', monospace; font-size: 0.85rem; background: #f8fafc; border: 1px solid #e2e8f0; padding: 0.75rem 1rem; color: #374151; max-width: 85%; border-radius: 0.5rem; }
+        .input-container { background: #fff; padding: 1rem; padding-bottom: calc(1rem + env(safe-area-inset-bottom)); }
+        .input-wrapper { max-width: 48rem; margin: 0 auto; display: flex; gap: 0.75rem; align-items: flex-end; }
+        .chat-input { flex: 1; padding: 0.8rem 1rem; border: 1px solid #d1d5db; border-radius: 0.75rem; background: #fff; color: #111827; font-size: 1rem; line-height: 1.5; resize: none; outline: none; min-height: 54px; max-height: 200px; transition: border-color 0.2s, box-shadow 0.2s; }
+        .chat-input::placeholder { color: #9ca3af; }
+        .chat-input:focus { border-color: #4f46e5; box-shadow: 0 0 0 3px rgba(79,70,229,0.1); }
+        .send-btn { flex-shrink: 0; width: 54px; height: 54px; border: 1px solid #111827; border-radius: 0.75rem; background: #111827; color: #fff; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: background 0.2s, border-color 0.2s; }
+        .send-btn:hover:not(:disabled) { background: #4f46e5; border-color: #4f46e5; }
+        .send-btn:disabled { cursor: not-allowed; border-color: #d1d5db; background: #e5e7eb; color: #9ca3af; }
+        .typing-indicator { display: inline-block; color: #6b7280; letter-spacing: 0.15em; }
+        .typing-indicator::after { content: '···'; animation: typing 1.4s infinite; }
+        @keyframes typing { 0%,60%,100%{opacity:.2;} 30%{opacity:1;} }
+        .error-message { background: #fee2e2; border: 1px solid #fecaca; color: #b91c1c; padding: 0.75rem 1rem; border-radius: 0.75rem; margin-top: 0.5rem; }
+    </style>
+</head>
+<body>
+    <div class="header"><div class="header-left">
+        <button class="new-btn" onclick="newConversation()" title="New Conversation (Ctrl+Shift+N)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+        </button>
+        <h1>ESM Chat</h1><span class="header-tag">Energy-Steered Model</span>
+    </div></div>
+    <div class="chat-container" id="chatContainer"><div class="chat-wrapper" id="chatWrapper"></div></div>
+    <div class="input-container"><div class="input-wrapper">
+        <textarea id="chatInput" class="chat-input" placeholder="Type a message or enter /help for commands..." rows="1" onkeydown="handleKeyDown(event)"></textarea>
+        <button id="sendButton" class="send-btn" onclick="sendMessage()" disabled>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+        </button>
+    </div></div>
+<script>
+const API_URL = '';
+const chatContainer = document.getElementById('chatContainer');
+const chatWrapper = document.getElementById('chatWrapper');
+const chatInput = document.getElementById('chatInput');
+const sendButton = document.getElementById('sendButton');
+let messages = [];
+let isGenerating = false;
+
+chatInput.addEventListener('input', function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 200) + 'px';
+    sendButton.disabled = !this.value.trim() || isGenerating;
+});
+
+function handleKeyDown(e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+}
+
+document.addEventListener('keydown', function(e) {
+    if (e.ctrlKey && e.shiftKey && e.key === 'N') { e.preventDefault(); if (!isGenerating) newConversation(); }
+});
+
+function newConversation() {
+    messages = []; chatWrapper.innerHTML = '';
+    chatInput.value = ''; chatInput.style.height = 'auto';
+    sendButton.disabled = false; isGenerating = false; chatInput.focus();
+}
+
+function addMessage(role, content, messageIndex) {
+    const div = document.createElement('div'); div.className = 'message ' + role;
+    const c = document.createElement('div'); c.className = 'message-content'; c.textContent = content;
+    if (role === 'user' && messageIndex !== undefined) {
+        c.title = 'Click to edit and restart from here';
+        c.addEventListener('click', () => { if (!isGenerating) editMessage(messageIndex); });
+    }
+    if (role === 'assistant' && messageIndex !== undefined) {
+        c.title = 'Click to regenerate this response';
+        c.addEventListener('click', () => { if (!isGenerating) regenerateMessage(messageIndex); });
+    }
+    div.appendChild(c); chatWrapper.appendChild(div); chatContainer.scrollTop = chatContainer.scrollHeight;
+    return c;
+}
+
+function editMessage(idx) {
+    if (idx < 0 || idx >= messages.length || messages[idx].role !== 'user') return;
+    chatInput.value = messages[idx].content; chatInput.style.height = 'auto';
+    chatInput.style.height = Math.min(chatInput.scrollHeight, 200) + 'px';
+    messages = messages.slice(0, idx);
+    const all = chatWrapper.querySelectorAll('.message');
+    for (let i = idx; i < all.length; i++) all[i].remove();
+    sendButton.disabled = false; chatInput.focus();
+}
+
+async function regenerateMessage(idx) {
+    if (idx < 0 || idx >= messages.length || messages[idx].role !== 'assistant') return;
+    messages = messages.slice(0, idx);
+    const all = chatWrapper.querySelectorAll('.message');
+    for (let i = idx; i < all.length; i++) all[i].remove();
+    await generateAssistantResponse();
+}
+
+async function generateAssistantResponse() {
+    isGenerating = true; sendButton.disabled = true;
+    const el = addMessage('assistant', ''); el.innerHTML = '<span class="typing-indicator"></span>';
+    try {
+        const resp = await fetch(API_URL + '/chat/completions', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({messages: messages})
+        });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const reader = resp.body.getReader(); const dec = new TextDecoder(); let full = ''; let pending = ''; el.textContent = '';
+        while (true) {
+            const {done, value} = await reader.read(); if (done) break;
+            pending += dec.decode(value, {stream: true});
+            const lines = pending.split('\n'); pending = lines.pop();
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                try {
+                    const d = JSON.parse(line.slice(6));
+                    if (d.token) { full += d.token; el.textContent = full; chatContainer.scrollTop = chatContainer.scrollHeight; }
+                    if (d.error) { el.innerHTML = '<div class="error-message">Error: ' + d.error + '</div>'; }
+                } catch (_) {}
+            }
+        }
+        const aidx = messages.length; messages.push({role: 'assistant', content: full});
+        el.title = 'Click to regenerate this response';
+        el.addEventListener('click', () => { if (!isGenerating) regenerateMessage(aidx); });
+    } catch (err) {
+        el.innerHTML = '<div class="error-message">Error: ' + err.message + '</div>';
+    } finally {
+        isGenerating = false; sendButton.disabled = !chatInput.value.trim();
+    }
+}
+
+async function handleSlashCommand(cmd) {
+    try {
+        const resp = await fetch(API_URL + '/command', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({command: cmd})
+        });
+        const data = await resp.json();
+        if (data.action === 'clear') { newConversation(); return; }
+        addMessage('console', data.result);
+    } catch (err) { addMessage('console', 'Error: ' + err.message); }
+}
+
+async function sendMessage() {
+    const msg = chatInput.value.trim(); if (!msg || isGenerating) return;
+    chatInput.value = ''; chatInput.style.height = 'auto';
+    if (msg.startsWith('/')) { await handleSlashCommand(msg); return; }
+    const uidx = messages.length; messages.push({role: 'user', content: msg});
+    addMessage('user', msg, uidx); await generateAssistantResponse();
+}
+
+sendButton.disabled = false; chatInput.focus();
+fetch(API_URL + '/health').then(r => r.json()).then(d => {
+    console.log('ESM Engine status:', d);
+}).catch(() => {
+    chatWrapper.innerHTML = '<div class="error-message">The ESM engine is not ready. Wait for the model to load, then refresh the page.</div>';
+});
+</script>
+</body>
+</html>"""
+
+    @app.get("/", response_class=HTMLResponse)
+    async def index():
+        return page
+
+    @app.get("/health")
+    async def health():
+        return {"status": "ok", "ready": engine.model is not None, "device": str(engine.device)}
+
+    @app.get("/status")
+    async def status():
+        info = engine.get_model_info()
+        info.update(runtime)
+        return info
+
+    @app.post("/command")
+    async def command(request: CommandRequest):
+        return _handle_web_command(request.command, engine, runtime)
+
+    @app.post("/chat/completions")
+    async def completions(request: ChatRequest):
+        messages = [
+            message.model_dump() if hasattr(message, "model_dump") else message.dict()
+            for message in request.messages
+        ]
+        if not messages:
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=400, detail="At least one message is required")
+        if messages[-1].get("role") != "user":
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=400, detail="The final message must be from the user")
+        temperature_value = (
+            runtime["temperature"] if request.temperature is None else request.temperature
+        )
+        top_p_value = runtime["top_p"] if request.top_p is None else request.top_p
+        max_tokens_value = (
+            runtime["max_tokens"] if request.max_tokens is None else request.max_tokens
+        )
+        temperature_value = max(0.0, min(2.0, temperature_value))
+        top_p_value = max(0.0, min(1.0, top_p_value))
+        max_tokens_value = max(1, min(4096, max_tokens_value))
+
+        async def stream_response():
+            async with generation_lock:
+                token_queue: queue.Queue = queue.Queue()
+
+                def worker():
+                    try:
+                        for token in engine.generate_stream(
+                            messages=messages,
+                            max_tokens=max_tokens_value,
+                            temperature=temperature_value,
+                            top_p=top_p_value,
+                        ):
+                            token_queue.put({"token": token})
+                    except Exception as exc:
+                        import logging
+
+                        logging.getLogger(__name__).exception("ESM generation failed")
+                        token_queue.put({"error": str(exc)})
+                    finally:
+                        token_queue.put(None)
+
+                task = asyncio.create_task(asyncio.to_thread(worker))
+                while True:
+                    item = await asyncio.to_thread(token_queue.get)
+                    if item is None:
+                        break
+                    yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+                await task
+                yield f"data: {json.dumps({'done': True})}\n\n"
+
+        return StreamingResponse(
+            stream_response(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
+
+    print_colored(f"Web chat listening on http://{host}:{port}", Colors.GREEN)
+    uvicorn.run(app, host=host, port=port)
+
+
 def main():
     _bootstrap_assets()
     parser = argparse.ArgumentParser(description="ESM interactive chat")
@@ -400,14 +880,15 @@ def main():
         help="Data type (default: bfloat16)",
     )
     parser.add_argument("--device", type=str, default="cuda", help="Device (default: cuda)")
+    parser.add_argument(
+        "--web", action="store_true", help="Serve the browser chat UI instead of the terminal"
+    )
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="Web server host")
+    parser.add_argument("--port", type=int, default=8000, help="Web server port")
 
     args = parser.parse_args()
 
     print_banner()
-
-    if not os.path.exists(args.checkpoint):
-        print_colored(f"Error: checkpoint not found: {args.checkpoint}", Colors.RED)
-        return 1
 
     dtype = torch.float32 if args.dtype == "float32" else torch.bfloat16
 
@@ -431,6 +912,21 @@ def main():
         traceback.print_exc()
         return 1
 
+    if args.web:
+        try:
+            run_web(
+                engine,
+                host=args.host,
+                port=args.port,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                max_tokens=args.max_tokens,
+            )
+        except Exception as exc:
+            print_colored(f"Error: failed to start web chat - {exc}", Colors.RED)
+            return 1
+        return 0
+
     print("=" * 70)
     print_colored("ESM chat is ready!", Colors.GREEN)
     print("=" * 70)
@@ -449,6 +945,7 @@ def main():
     session_total_tokens = 0
     session_total_time = 0.0
     session_turns = 0
+    conversation: List[Dict[str, str]] = []
 
     while True:
         try:
@@ -461,6 +958,7 @@ def main():
                 break
 
             if cmd == "/clear":
+                conversation.clear()
                 os.system("clear" if os.name == "posix" else "cls")
                 print_banner()
                 continue
@@ -543,13 +1041,15 @@ def main():
             print(f"{Colors.GREEN}ESM:{Colors.RESET} ", end="", flush=True)
 
             try:
+                conversation.append({"role": "user", "content": user_input})
                 generated_text, stats = engine.generate(
-                    prompt=user_input,
+                    messages=conversation,
                     max_tokens=max_tokens,
                     temperature=temperature,
                     top_p=top_p,
                     stream=True,
                 )
+                conversation.append({"role": "assistant", "content": generated_text})
                 print()
 
                 session_total_tokens += stats["tokens_generated"]
@@ -565,6 +1065,8 @@ def main():
                     print()
 
             except Exception as e:
+                if conversation and conversation[-1].get("role") == "user":
+                    conversation.pop()
                 print()
                 print_colored(f"✗ Generation error: {str(e)}", Colors.RED)
                 import traceback

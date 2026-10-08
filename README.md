@@ -1,39 +1,27 @@
 <p align="center">
-  <img src="assets/openesm-github-title.png" alt="HarborRL" width=800>
-</p>
-
-<!-- <p align="center">
-  <a href="pyproject.toml"><img src="https://img.shields.io/badge/version-1.0.0-blue.svg" alt="Version"></a>
-  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+"></a>
-  <a href="https://pytorch.org/"><img src="https://img.shields.io/badge/PyTorch-2.4%2B-ee4c2c.svg" alt="PyTorch 2.4+"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License"></a>
-</p> -->
-
-
-
-
-<p align="center">
-  <a href="https://arxiv.org/abs/2608.07346"><img src="https://img.shields.io/badge/Paper-b31b1b?style=for-the-badge&logo=arxiv&logoColor=white" alt="Paper"/></a>
-  <a href="https://github.com/datamllab/A2E"><img src="https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub"/></a>
-  <a href="https://colab.research.google.com/github/stevewithjobs/AEP/blob/yuchenyue/notebooks/a2e_quickstart.ipynb"><img src="https://img.shields.io/badge/Colab-F9AB00?style=for-the-badge&logo=googlecolab&logoColor=white" alt="Colab"/></a>
-  <a href="https://huggingface.co/papers/2608.07346"><img src="https://img.shields.io/badge/HuggingFace-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black" alt="HuggingFace"/></a>
+  <img src="assets/openesm-github-title.png" alt="OpenESM" width=800>
 </p>
 
 <p align="center">
-  <strong>The first repository for training and scaling up energy-based foundation models</strong>
+  <a href="https://github.com/datamllab/openesm"><img src="https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub"/></a>
+  <a href="https://huggingface.co/collections/guan-wang/openesm"><img src="https://img.shields.io/badge/HuggingFace-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black" alt="HuggingFace"/></a>
 </p>
 
 <p align="center">
-  <strong>Keywords: </strong> energy-based models, foundation models, large language models, scaling law
+  <strong>Open-source code for training and scaling Energy-Steered Models</strong>
+</p>
+
+<p align="center">
+  <strong>Keywords: </strong> Energy-Steered Models, language models, pretraining, scaling laws
 </p>
 
 
 <p align="center">
   <a href="#-updates">🎉 Updates</a> •
-  <a href="#1-quick-start">🚀 Quick Start</a> •
-  <a href="#2-scaling-law">📈 Scaling Law</a> •
-  <a href="#3-checkpoint">⚙️ Pretrained Checkpoints</a> •
-  <a href="#3-chat">💬 Chat Demo</a>
+  <a href="#-quick-start">🚀 Quick Start</a> •
+  <a href="#-scaling-law">📈 Scaling Law</a> •
+  <a href="#-pretrained-checkpoints">⚙️ Pretrained Checkpoints</a> •
+  <a href="#-chat-demo">💬 Chat Demo</a>
 </p>
 
 
@@ -47,24 +35,115 @@
 ## 🎉 Updates
 
 - **2026-10-07** — ✨✨ Full codebase released.
-- **2026-10-07** — 📄 OpenESM preprint posted on [arXiv](https://arxiv.org/abs/2608.07346).
 
 
 ## 🚀 Quick Start
 
-...
+Install the project from the repository root. Select one PyTorch extra:
+
+```bash
+# NVIDIA GPU
+uv sync --extra gpu
+
+# CPU-only machine
+uv sync --extra cpu
+```
+
+Run a complete training job by setting the token budget:
+
+```bash
+TARGET_TOTAL_TOKENS=100000000 bash runs/train.sh
+```
+
+Run evaluation or interactive generation with a checkpoint:
+
+```bash
+bash runs/eval.sh --checkpoint /path/to/model.ckpt \
+  --dataset dclm --data-dir /path/to/data
+
+bash runs/chat.sh --checkpoint /path/to/model.ckpt \
+  --tokenizer-path /path/to/tokenizer
+
+# Browser UI and streaming API
+uv sync --extra gpu --extra web
+bash runs/chat.sh --web --checkpoint /path/to/model.ckpt --port 8000
+```
+
+Published checkpoints can also be loaded directly with Transformers. Install
+the optional Hugging Face dependencies with `uv sync --extra gpu --extra hf`
+and follow the example in the checkpoint section below.
 
 ## 📈 Scaling Law
 
-...
+Validation BPB decreases with training tokens on ClimbMix, DCLM, and FineWeb.
+On DCLM, the results also show lower validation error at larger token budgets
+and model depths, while IsoFLOP curves indicate that the compute-optimal model
+size grows with the training budget.
+
+<table>
+  <tr>
+    <td align="center" width="50%"><img src="figs/scaling_pretrain_climbmix_validation_bpb.png" width="100%" alt="ClimbMix validation BPB during pretraining"><br>ClimbMix</td>
+    <td align="center" width="50%"><img src="figs/scaling_pretrain_dclm_validation_bpb.png" width="100%" alt="DCLM validation BPB during pretraining"><br>DCLM</td>
+  </tr>
+  <tr>
+    <td align="center" width="50%"><img src="figs/scaling_pretrain_fineweb_validation_bpb.png" width="100%" alt="FineWeb validation BPB during pretraining"><br>FineWeb</td>
+    <td align="center" width="50%"><img src="figs/dclm_best_val_bpb_vs_tokens.png" width="100%" alt="DCLM validation BPB versus training tokens"><br>Token scaling</td>
+  </tr>
+  <tr>
+    <td align="center" width="50%"><img src="figs/dclm_best_val_bpb_vs_depth.png" width="100%" alt="DCLM validation BPB versus model depth"><br>Depth scaling</td>
+    <td align="center" width="50%"><img src="figs/scaling_isoflop_dclm.png" width="100%" alt="DCLM IsoFLOP scaling curves"><br>IsoFLOP scaling</td>
+  </tr>
+</table>
+
+Use `configs/train.yaml` as the default configuration and set
+`TARGET_TOTAL_TOKENS` to choose the training budget.
 
 ## ⚙️ Pretrained Checkpoints
 
-...
+Pretrained models are published in the
+[OpenESM Hugging Face collection](https://huggingface.co/collections/guan-wang/openesm).
+The collection includes models trained on OWT, DCLM, FineWeb, and ClimbMix in
+the 160M, 520M, and 1B parameter classes, together with the FineWeb SFT model.
+
+The recommended repository format is the standard Transformers format. A
+legacy Lightning checkpoint can be converted with:
+
+```bash
+uv sync --extra cpu --extra hf
+python -m scripts.export_hf \
+  /path/to/model.ckpt \
+  /path/to/hf-model \
+  --tokenizer-dir /path/to/tokenizer
+```
+
+The exported directory contains `config.json`, `model.safetensors`, the
+custom modeling and configuration files, and tokenizer files. It can then be
+loaded with:
+
+```python
+from transformers import AutoModelForMaskedLM, AutoTokenizer
+
+model_id = "guan-wang/ESM-OWT-160M"
+tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+model = AutoModelForMaskedLM.from_pretrained(model_id, trust_remote_code=True)
+```
 
 ## 💬 Chat Demo
 
-...
+<p align="center">
+  <img src="figs/chat.jpg" alt="ESM Chat web interface" width="850">
+</p>
+
+Run the interactive demo with a local checkpoint:
+
+```bash
+bash runs/chat.sh \
+  --checkpoint /path/to/model.ckpt \
+  --tokenizer-path /path/to/tokenizer
+```
+
+The demo uses the checkpoint's saved hyperparameters and supports the same
+tokenizer assets as standalone checkpoint loading.
 
 From the repository root:
 
@@ -141,53 +220,119 @@ Data and tokenizer assets are not included in the repository. Pass their
 locations through the configuration or command line. Supported pretraining
 and BPB datasets include DCLM, FineWeb, ClimbMix, and OWT.
 
-## Hugging Face models
+## Standalone checkpoint loading
 
-Export a Lightning checkpoint and its tokenizer to the standard Transformers
-layout:
+`esm/modeling_esm.py` contains the model classes and loader for Lightning
+checkpoints. To share a Lightning checkpoint for direct ESM loading, include
+the checkpoint and tokenizer assets alongside this file:
 
-```bash
-uv sync --extra gpu --extra hf
-python -m scripts.export_hf \
-  /path/to/checkpoints/final.ckpt \
-  ./hf-model \
-  --tokenizer-dir /path/to/tokenizer
+```text
+model-repository/
+├── modeling_esm.py
+├── model.ckpt
+└── tokenizer/
+    ├── tokenizer.pkl
+    └── token_bytes.pt
 ```
 
-Upload the contents of `hf-model/` to a model repository. It includes
-`config.json`, `model.safetensors`, `modeling_esm.py`,
-`configuration_esm.py`, and the serialized ESM tokenizer. The optional
-`token_bytes.pt` is retained for BPB evaluation.
-
-Load from the Hub with Transformers:
+Install PyTorch and `tiktoken`, copy `modeling_esm.py` beside the checkpoint,
+and run:
 
 ```python
 import torch
-from transformers import AutoModelForMaskedLM, AutoTokenizer
+from modeling_esm import load_checkpoint
 
-repo_id = "your-account/your-esm-model"
-tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
-model = AutoModelForMaskedLM.from_pretrained(repo_id, trust_remote_code=True)
+model, tokenizer, hparams, device = load_checkpoint(
+    "model.ckpt",
+    tokenizer_path="tokenizer",
+)
 
-inputs = tokenizer("hello", return_tensors="pt")
-with torch.no_grad():
-    logits = model(**inputs).logits
+input_ids = torch.tensor(
+    [tokenizer.encode("hello", append=tokenizer.get_bos_token_id())],
+    device=device,
+)
+logits = model(input_ids)
 print(logits.shape)
 ```
 
-The ESM tokenizer prepends its BOS token by default through the standard
-Transformers tokenizer interface. ESM's legacy `load_checkpoint()` API remains
-available for Lightning checkpoints and existing evaluation scripts.
+If the checkpoint and `tokenizer/` directory are siblings, omit
+`tokenizer_path`. `token_bytes.pt` is needed for BPB evaluation; logits-only
+inference only needs `tokenizer.pkl`. The loader accepts a Lightning
+checkpoint, a local Transformers directory, or a Hugging Face model ID and
+returns the same inference interface. Standard Transformers repositories
+also include `configuration_esm.py`, model weights, `config.json`, and
+tokenizer files; `scripts/export_hf.py` creates this layout.
 
 ## Repository layout
 
 ```text
-configs/      Reproducible training and evaluation defaults
-esm/          Model, data, optimizer, tokenizer, and checkpoint code
-scripts/      Python entry points
-runs/         Local shell launchers
-tasks/        QA and supervised-task definitions
-tests/        Lightweight unit tests
+openesm/
+├── assets/                                  # Repository branding assets
+│   └── openesm-github-title.png             # README title banner
+├── configs/                                 # Default run configurations
+│   ├── eval.yaml                 # Evaluation defaults
+│   └── train.yaml                # Pretraining defaults
+├── esm/                                     # Model, data, and training library
+│   ├── __init__.py                           # Package initialization
+│   ├── common.py                             # Shared constants and utilities
+│   ├── config.py                             # Training and evaluation config parsing
+│   ├── configuration_esm.py                  # Transformers model configuration
+│   ├── core_eval.py                          # Core benchmark evaluation
+│   ├── dataloader.py                         # Streaming data loaders
+│   ├── dataset.py                             # Shared dataset utilities
+│   ├── dataset_sft.py                        # Supervised fine-tuning datasets
+│   ├── disk_aware_checkpoint.py              # Checkpoint save/load utilities
+│   ├── logger.py                              # Training metric and artifact logging
+│   ├── metrics.py                             # Loss and BPB metrics
+│   ├── modeling_esm.py                        # ESM architecture, loading, and inference
+│   ├── optim.py                               # Muon and AdamW optimizers and schedules
+│   ├── pretrain_dataset.py                    # Pretraining data pipeline
+│   ├── tokenizer.py                           # ESM tokenizer and tokenizer loading
+│   └── trainer.py                             # Lightning training and evaluation module
+├── figs/                                    # README figures and demo images
+│   ├── chat.jpg                               # Web chat interface screenshot
+│   ├── dclm_best_val_bpb_vs_depth.png          # DCLM depth scaling plot
+│   ├── dclm_best_val_bpb_vs_tokens.png         # DCLM token scaling plot
+│   ├── scaling_isoflop_dclm.png                # DCLM IsoFLOP scaling plot
+│   ├── scaling_pretrain_climbmix_validation_bpb.png # ClimbMix validation BPB plot
+│   ├── scaling_pretrain_dclm_validation_bpb.png     # DCLM validation BPB plot
+│   └── scaling_pretrain_fineweb_validation_bpb.png  # FineWeb validation BPB plot
+├── runs/                                    # Shell entry points for common workflows
+│   ├── chat.sh                   # Launch interactive chat
+│   ├── eval.sh                   # Run validation evaluation
+│   ├── prepare_data.sh           # Prepare and tokenize datasets
+│   ├── qa.sh                     # Run task-based QA evaluation
+│   ├── sft.sh                    # Fine-tune from a checkpoint
+│   ├── train.sh                  # Pretrain an ESM model
+│   └── zeroshot.sh               # Run zero-shot benchmarks
+├── scripts/                                 # Python command-line entry points
+│   ├── chat.py                   # Serve terminal or web chat
+│   ├── eval.py                   # Evaluate validation loss and BPB
+│   ├── export_hf.py              # Export a checkpoint to Transformers format
+│   ├── prepare_data.py           # Build training and evaluation data
+│   ├── qa.py                     # Evaluate QA task suites
+│   ├── sft.py                    # Run supervised fine-tuning
+│   ├── train.py                  # Run pretraining
+│   ├── zeroshot.py               # Run zero-shot benchmark evaluation
+│   └── zeroshot_datasets.py      # Define zero-shot benchmark datasets
+├── tasks/                                   # Dataset/task adapters for evaluation
+│   ├── common.py                             # Shared task interfaces and helpers
+│   ├── customjson.py                         # Load custom JSON evaluation tasks
+│   ├── gsm8k.py                              # GSM8K math reasoning task
+│   ├── mmlu.py                               # MMLU multiple-choice task
+│   ├── smoltalk.py                           # SmolTalk conversation task
+│   └── spellingbee.py                        # SpellingBee word-generation task
+├── tests/                                   # Lightweight unit and compatibility tests
+│   ├── test_config_and_boundaries.py       # Validate config and data boundaries
+│   ├── test_dataloader_lightweight_state.py # Check lightweight loader state
+│   ├── test_dataset_sft_mask.py            # Check SFT loss masking
+│   ├── test_hf_configuration.py            # Check Transformers configuration
+│   └── test_modeling_esm_rope.py           # Check rotary embeddings
+├── .gitignore                                # Excludes local data, outputs, and caches
+├── pyproject.toml                            # Package metadata and dependency groups
+├── README.md                                 # English project guide
+├── README_zh.md                              # Simplified Chinese project guide
+└── uv.lock                                   # Locked dependency versions
 ```
 
 Cluster-specific rjob submitters, private data, checkpoints, caches, logs,

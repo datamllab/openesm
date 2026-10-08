@@ -40,6 +40,7 @@ python_functions = ["test_*"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["esm*", "scripts*", "tasks*"]
+namespaces = true
 
 [build-system]
 requires = ["setuptools>=80.9.0"]
@@ -71,6 +72,10 @@ gpu = [
 hf = [
     "safetensors>=0.4.5",
     "transformers>=4.45.0",
+]
+web = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
 ]
 deepspeed = [
     "deepspeed>=0.19.0",
