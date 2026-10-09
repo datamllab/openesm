@@ -23,14 +23,11 @@
 
 ## 🚀 快速开始
 
-在仓库根目录安装环境，并选择一个 PyTorch extra：
+一次性安装 GPU、Hugging Face 和网页聊天所需依赖：
 
 ```bash
-# NVIDIA GPU
-uv sync --extra gpu
-
-# 仅使用 CPU
-uv sync --extra cpu
+uv sync --extra gpu --extra hf --extra web
+source .venv/bin/activate
 ```
 
 设置训练 token 预算后启动完整训练：
@@ -39,41 +36,19 @@ uv sync --extra cpu
 TARGET_TOTAL_TOKENS=100000000 bash runs/train.sh
 ```
 
-使用 checkpoint 执行评估或启动交互式生成：
-
-```bash
-bash runs/eval.sh --checkpoint /path/to/model.ckpt \
-  --dataset dclm --data-dir /path/to/data
-
-bash runs/chat.sh --checkpoint /path/to/model.ckpt \
-  --tokenizer-path /path/to/tokenizer
-
-# 浏览器界面和流式 API
-uv sync --extra gpu --extra web
-bash runs/chat.sh --web --checkpoint /path/to/model.ckpt --port 8000
-```
-
-发布到 Hugging Face 的模型可以直接使用 Transformers 加载。先安装额外
-依赖 `uv sync --extra gpu --extra hf`，然后参考下方的 checkpoint 章节。
-
 ## 📈 Scaling Law
 
-在 ClimbMix、DCLM 和 FineWeb 上，验证 BPB 随训练 token 数增加而下降。
-DCLM 结果还显示，增加 token 预算和模型深度可降低验证误差；IsoFLOP 曲线
-则表明，训练预算提高时，计算最优模型规模也随之增大。
+在 DCLM 上，增加训练 token 数和模型规模可降低验证 BPB。在 ClimbMix、
+DCLM 和 FineWeb 上，零样本准确率随模型规模提升，也会随训练 token 数增加。
 
 <table>
   <tr>
-    <td align="center" width="50%"><img src="figs/scaling_pretrain_climbmix_validation_bpb.png" width="100%" alt="ClimbMix 预训练验证 BPB"><br>ClimbMix</td>
-    <td align="center" width="50%"><img src="figs/scaling_pretrain_dclm_validation_bpb.png" width="100%" alt="DCLM 预训练验证 BPB"><br>DCLM</td>
+    <td align="center" width="50%"><img src="figs/scaling_pretrain_dclm_validation_bpb.png" width="100%" alt="DCLM 验证 BPB 与训练 token 数的关系"><br>DCLM 预训练</td>
+    <td align="center" width="50%"><img src="figs/dclm_best_val_bpb_vs_depth.png" width="100%" alt="DCLM 验证 BPB 与模型规模的关系"><br>参数规模扩展</td>
   </tr>
   <tr>
-    <td align="center" width="50%"><img src="figs/scaling_pretrain_fineweb_validation_bpb.png" width="100%" alt="FineWeb 预训练验证 BPB"><br>FineWeb</td>
-    <td align="center" width="50%"><img src="figs/dclm_best_val_bpb_vs_tokens.png" width="100%" alt="DCLM 验证 BPB 与训练 token 数的关系"><br>Token scaling</td>
-  </tr>
-  <tr>
-    <td align="center" width="50%"><img src="figs/dclm_best_val_bpb_vs_depth.png" width="100%" alt="DCLM 验证 BPB 与模型深度的关系"><br>Depth scaling</td>
-    <td align="center" width="50%"><img src="figs/scaling_isoflop_dclm.png" width="100%" alt="DCLM IsoFLOP scaling 曲线"><br>IsoFLOP scaling</td>
+    <td align="center" width="50%"><img src="figs/qa_acc_vs_model_size.png" width="100%" alt="不同训练数据集上的平均零样本准确率与模型规模"><br>零样本参数规模扩展</td>
+    <td align="center" width="50%"><img src="figs/zero_shot_acc_vs_training_tokens.png" width="100%" alt="零样本准确率与训练 token 数的关系"><br>零样本 token 扩展</td>
   </tr>
 </table>
 
@@ -84,30 +59,27 @@ DCLM 结果还显示，增加 token 预算和模型深度可降低验证误差�
 
 预训练模型发布在
 [OpenESM Hugging Face collection](https://huggingface.co/collections/guan-wang/openesm)
-中。Collection 包含基于 OWT、DCLM、FineWeb 和 ClimbMix 训练的 160M、520M
-和 1B 参数规模模型，以及 FineWeb SFT 模型。
+中。Collection 包含基于 DCLM、FineWeb 和 ClimbMix 训练的 160M、520M 和 1B
+参数规模模型；一个 160M OWT 模型；以及一个名为 `ESM-FineWeb-1B-CHAT` 的
+FineWeb SFT 模型。
 
-推荐使用标准 Transformers 格式。可以使用下面的命令将旧版 Lightning
-checkpoint 转换为标准格式：
-
-```bash
-uv sync --extra cpu --extra hf
-python -m scripts.export_hf \
-  /path/to/model.ckpt \
-  /path/to/hf-model \
-  --tokenizer-dir /path/to/tokenizer
-```
-
-转换后的目录包含 `config.json`、`model.safetensors`、自定义 modeling 和
-configuration 文件，以及 tokenizer 文件。之后可以这样加载：
+可以直接通过 Hugging Face 模型 ID 加载已发布模型。首次加载会自动下载
+并缓存权重和 tokenizer：
 
 ```python
-from transformers import AutoModelForMaskedLM, AutoTokenizer
+import torch
+from esm.modeling_esm import load_checkpoint
 
-model_id = "guan-wang/ESM-OWT-160M"
-tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-model = AutoModelForMaskedLM.from_pretrained(model_id, trust_remote_code=True)
+model_id = "guan-wang/ESM-FineWeb-1B-CHAT"
+model, tokenizer, hparams, device = load_checkpoint(model_id, device="cuda")
+tokens = tokenizer.encode("Hello, ESM.", append=tokenizer.get_bos_token_id())
+input_ids = torch.tensor([tokens], dtype=torch.long, device=device)
+with torch.no_grad():
+    logits = model(input_ids)
+print(logits.shape)
 ```
+
+也可以将模型 ID 替换为 collection 中的其他模型仓库。
 
 ## 💬 Chat Demo
 
@@ -115,28 +87,18 @@ model = AutoModelForMaskedLM.from_pretrained(model_id, trust_remote_code=True)
   <img src="figs/chat.jpg" alt="ESM Chat 网页界面" width="850">
 </p>
 
-使用本地 checkpoint 启动交互式对话：
+使用 Hugging Face 上发布的 SFT 模型启动网页聊天：
 
 ```bash
-bash runs/chat.sh \
-  --checkpoint /path/to/model.ckpt \
-  --tokenizer-path /path/to/tokenizer
+bash runs/chat.sh --web \
+  --checkpoint guan-wang/ESM-FineWeb-1B-CHAT \
+  --host 0.0.0.0 \
+  --port 8000
 ```
 
-该 Demo 使用 checkpoint 中保存的 hyperparameters，并支持独立 checkpoint
-加载章节中介绍的 tokenizer 文件。
-
-在仓库根目录执行：
-
-```bash
-uv sync --extra gpu
-```
-
-仅使用 CPU 时执行 `uv sync --extra cpu`。运行测试时添加 `--group dev`：
-
-```bash
-uv sync --extra cpu --group dev
-```
+在运行服务器的机器上用浏览器打开
+[http://localhost:8000](http://localhost:8000)。如果服务运行在远程 GPU 节点，
+请使用集群端口转发将 8000 端口映射到本机。
 
 CPU 和 CUDA 的 PyTorch 软件源配置在 `pyproject.toml` 中。每个环境选择
 一个 extra 即可。
@@ -150,34 +112,36 @@ CPU 和 CUDA 的 PyTorch 软件源配置在 `pyproject.toml` 中。每个环境�
 # 预训练：训练长度由 TARGET_TOTAL_TOKENS 决定。
 TARGET_TOTAL_TOKENS=100000000 bash runs/train.sh
 
-# 使用指定 checkpoint 进行监督微调。
-bash runs/sft.sh \
-  --execution_mode finetune \
+# 微调：从 Hugging Face 上发布的模型初始化权重。
+TARGET_TOTAL_TOKENS=100000000 bash runs/sft.sh \
   --dataset_name esm_sft \
-  --finetuning_model_ckpt /path/to/pretrain.ckpt
+  --finetuning_model_ckpt guan-wang/ESM-DCLM-1B
 
 # Position-wise BPB evaluation。
+MODEL_DIR="$(python -c 'from huggingface_hub import snapshot_download; print(snapshot_download(repo_id="guan-wang/ESM-DCLM-1B"))')"
 bash runs/eval.sh \
-  --checkpoint /path/to/model.ckpt \
+  --checkpoint guan-wang/ESM-DCLM-1B \
   --dataset dclm \
   --data-dir /path/to/data \
+  --tokenizer-path "${MODEL_DIR}" \
   --output_root . \
   --run_name eval-dclm
 
 # QA evaluation。
 bash runs/qa.sh \
-  --checkpoint /path/to/model.ckpt \
+  --checkpoint guan-wang/ESM-DCLM-1B \
+  --tokenizer-path "${MODEL_DIR}" \
   --eval-bundle /path/to/eval_bundle \
   --output_root . \
   --run_name qa-dclm
 
 # 交互式生成。
-bash runs/chat.sh --checkpoint /path/to/model.ckpt
-
-# Zero-shot evaluation 使用 OWT 预训练 checkpoint 和准备好的数据。
-CKPT=/path/to/owt-model.ckpt DATA_ROOT=/path/to/zeroshot-data \
-  bash runs/zeroshot.sh
+bash runs/chat.sh --checkpoint guan-wang/ESM-FineWeb-1B-CHAT
 ```
+
+Chat、验证集评估、QA 评估和 SFT 初始化均可直接使用 Hugging Face 模型 ID。BPB
+评估还需传入本地下载目录以读取 `token_bytes.pt`。Zero-shot 评估目前仍要求本地
+Lightning checkpoint。
 
 训练读取 `configs/train.yaml`，评估读取 `configs/eval.yaml`。显式命令行参数
 优先于 YAML 配置。训练长度由 `TARGET_TOTAL_TOKENS` 控制。有效的梯度累积
@@ -197,47 +161,30 @@ outputs/<run-name>/
 数据和 tokenizer 文件不包含在代码仓库中，需要通过配置或命令行传入路径。
 支持的预训练和 BPB 数据集包括 DCLM、FineWeb、ClimbMix 和 OWT。
 
-## 独立加载 Checkpoint
+## 从 Hugging Face 加载
 
-`esm/modeling_esm.py` 包含模型类和 Lightning checkpoint 加载器。若要直接
-使用 ESM 加载 Lightning checkpoint，请将 checkpoint、tokenizer 文件和此文件
-一同放入模型仓库：
-
-```text
-model-repository/
-├── modeling_esm.py
-├── model.ckpt
-└── tokenizer/
-    ├── tokenizer.pkl
-    └── token_bytes.pt
-```
-
-安装 PyTorch 和 `tiktoken`，将 `modeling_esm.py` 放到 checkpoint 旁边，然后
-执行：
+`load_checkpoint()` 接受 Hugging Face 模型 ID，并自动下载 Transformers 权重
+和 tokenizer。例如：
 
 ```python
 import torch
-from modeling_esm import load_checkpoint
+from esm.modeling_esm import load_checkpoint
 
 model, tokenizer, hparams, device = load_checkpoint(
-    "model.ckpt",
-    tokenizer_path="tokenizer",
+    "guan-wang/ESM-OWT-160M", device="cuda"
 )
-
+tokens = tokenizer.encode("hello", append=tokenizer.get_bos_token_id())
 input_ids = torch.tensor(
-    [tokenizer.encode("hello", append=tokenizer.get_bos_token_id())],
-    device=device,
+    [tokens], dtype=torch.long, device=device
 )
-logits = model(input_ids)
+with torch.no_grad():
+    logits = model(input_ids)
 print(logits.shape)
 ```
 
-如果 checkpoint 和 `tokenizer/` 是同级目录，可以省略 `tokenizer_path`。
-`token_bytes.pt` 用于 BPB evaluation；只进行 logits 推理时只需要
-`tokenizer.pkl`。加载器接受 Lightning checkpoint、本地 Transformers 目录或
-Hugging Face 模型 ID，并返回统一的推理接口。标准 Transformers 模型仓库还
-需要 `configuration_esm.py`、模型权重、`config.json` 和 tokenizer 文件；
-`scripts/export_hf.py` 可以生成这种目录结构。
+进行 BPB 评估时，需将同一模型仓库下载到本地，并把该目录传给
+`--tokenizer-path`；仓库中包含指标计算所需的 tokenizer byte table。加载器也
+支持本地 Transformers 目录和本项目训练产生的 Lightning checkpoint。
 
 ## 仓库结构
 
@@ -267,12 +214,10 @@ openesm/
 │   └── trainer.py                             # Lightning 训练与评估模块
 ├── figs/                                    # README 图片和演示截图
 │   ├── chat.jpg                               # 网页聊天界面截图
-│   ├── dclm_best_val_bpb_vs_depth.png          # DCLM 深度扩展图
-│   ├── dclm_best_val_bpb_vs_tokens.png         # DCLM token 扩展图
-│   ├── scaling_isoflop_dclm.png                # DCLM IsoFLOP 扩展图
-│   ├── scaling_pretrain_climbmix_validation_bpb.png # ClimbMix 验证 BPB 图
-│   ├── scaling_pretrain_dclm_validation_bpb.png     # DCLM 验证 BPB 图
-│   └── scaling_pretrain_fineweb_validation_bpb.png  # FineWeb 验证 BPB 图
+│   ├── dclm_best_val_bpb_vs_depth.png          # DCLM 参数规模扩展图
+│   ├── qa_acc_vs_model_size.png                # 不同模型规模的零样本准确率
+│   ├── scaling_pretrain_dclm_validation_bpb.png # DCLM 验证 BPB 与 token 数关系图
+│   └── zero_shot_acc_vs_training_tokens.png    # 零样本准确率与 token 数关系图
 ├── runs/                                    # 常用工作流的 Shell 入口
 │   ├── chat.sh                   # 启动交互式聊天
 │   ├── eval.sh                   # 执行验证集评估
@@ -311,9 +256,6 @@ openesm/
 └── uv.lock                                   # 锁定的依赖版本
 ```
 
-集群专用的 rjob 提交脚本、私有数据、checkpoint、缓存、日志和生成结果应
-放在公共源码树之外，或由 `.gitignore` 忽略。
-
 ## 开发
 
 ```bash
@@ -324,6 +266,3 @@ python -m scripts.eval --help
 python -m scripts.qa --help
 python -m scripts.chat --help
 ```
-
-公共代码树保持精简：模型、数据接口、可运行入口和轻量测试是项目的主要
-来源。

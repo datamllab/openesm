@@ -53,7 +53,7 @@ except ImportError:
 from esm import logger as text_logger
 from esm.disk_aware_checkpoint import DiskAwareCheckpoint, DiskAwareFinalCheckpoint
 from esm.config import parse_with_config, print_resolved_config
-from esm.modeling_esm import init_wandb_watch, model_sizes
+from esm.modeling_esm import init_wandb_watch, load_checkpoint, model_sizes
 
 
 @rank_zero_only
@@ -398,10 +398,41 @@ def main(args):
 
     if args.finetuning_model_ckpt is not None and args.finetuning_model_ckpt != "":
         print(f"[SFT] Loading pretrained weights: {args.finetuning_model_ckpt}")
-        ckpt = torch.load(
-            args.finetuning_model_ckpt, map_location="cpu", weights_only=False
+        pretrained, _, _, _ = load_checkpoint(
+            args.finetuning_model_ckpt,
+            device="cpu",
+            dtype="float32",
+            tokenizer_path=getattr(args, "tokenizer_dir", None),
         )
-        model_trainer.load_state_dict(ckpt["state_dict"], strict=False)
+        pretrained_state = {
+            f"model.{key}": value
+            for key, value in pretrained.model.state_dict().items()
+        }
+        trainer_state = model_trainer.state_dict()
+        compatible_state = {}
+        matched_keys = set()
+        for target_key in trainer_state:
+            source_key = target_key.replace("._orig_mod.", ".")
+            if source_key.startswith("model.transformer_eager."):
+                source_key = source_key.replace(
+                    "model.transformer_eager.", "model.transformer.", 1
+                )
+            if source_key in pretrained_state:
+                compatible_state[target_key] = pretrained_state[source_key]
+                matched_keys.add(source_key)
+
+        unexpected_keys = sorted(set(pretrained_state) - matched_keys)
+        if unexpected_keys:
+            raise RuntimeError(
+                "Unexpected pretrained parameter keys: "
+                + ", ".join(unexpected_keys[:10])
+            )
+        incompatible = model_trainer.load_state_dict(compatible_state, strict=False)
+        if incompatible.missing_keys:
+            print(
+                "[SFT] Parameters not initialized from the pretrained model: "
+                + ", ".join(incompatible.missing_keys[:10])
+            )
         print("[SFT] Weights loaded; training starts from step 0")
 
     is_rank_zero_process = int(os.environ.get("RANK", "0")) == 0
@@ -795,7 +826,7 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--finetuning_model_ckpt",
-        help="model ckpt when finetuning",
+        help="pretrained model source for fine-tuning: Lightning checkpoint, Transformers directory, or Hugging Face model ID",
         type=str,
         default=None,
     )

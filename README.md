@@ -39,14 +39,11 @@
 
 ## 🚀 Quick Start
 
-Install the project from the repository root. Select one PyTorch extra:
+Install the GPU, Hugging Face, and web-chat dependencies once:
 
 ```bash
-# NVIDIA GPU
-uv sync --extra gpu
-
-# CPU-only machine
-uv sync --extra cpu
+uv sync --extra gpu --extra hf --extra web
+source .venv/bin/activate
 ```
 
 Run a complete training job by setting the token budget:
@@ -55,43 +52,20 @@ Run a complete training job by setting the token budget:
 TARGET_TOTAL_TOKENS=100000000 bash runs/train.sh
 ```
 
-Run evaluation or interactive generation with a checkpoint:
-
-```bash
-bash runs/eval.sh --checkpoint /path/to/model.ckpt \
-  --dataset dclm --data-dir /path/to/data
-
-bash runs/chat.sh --checkpoint /path/to/model.ckpt \
-  --tokenizer-path /path/to/tokenizer
-
-# Browser UI and streaming API
-uv sync --extra gpu --extra web
-bash runs/chat.sh --web --checkpoint /path/to/model.ckpt --port 8000
-```
-
-Published checkpoints can also be loaded directly with Transformers. Install
-the optional Hugging Face dependencies with `uv sync --extra gpu --extra hf`
-and follow the example in the checkpoint section below.
-
 ## 📈 Scaling Law
 
-Validation BPB decreases with training tokens on ClimbMix, DCLM, and FineWeb.
-On DCLM, the results also show lower validation error at larger token budgets
-and model depths, while IsoFLOP curves indicate that the compute-optimal model
-size grows with the training budget.
+On DCLM, validation BPB falls as training tokens and model size increase.
+Zero-shot accuracy scales with model size across ClimbMix, DCLM, and FineWeb,
+and improves with training tokens.
 
 <table>
   <tr>
-    <td align="center" width="50%"><img src="figs/scaling_pretrain_climbmix_validation_bpb.png" width="100%" alt="ClimbMix validation BPB during pretraining"><br>ClimbMix</td>
-    <td align="center" width="50%"><img src="figs/scaling_pretrain_dclm_validation_bpb.png" width="100%" alt="DCLM validation BPB during pretraining"><br>DCLM</td>
+    <td align="center" width="50%"><img src="figs/scaling_pretrain_dclm_validation_bpb.png" width="100%" alt="DCLM validation BPB versus training tokens"><br>DCLM pretraining</td>
+    <td align="center" width="50%"><img src="figs/dclm_best_val_bpb_vs_depth.png" width="100%" alt="DCLM validation BPB versus model size"><br>Parameter scaling</td>
   </tr>
   <tr>
-    <td align="center" width="50%"><img src="figs/scaling_pretrain_fineweb_validation_bpb.png" width="100%" alt="FineWeb validation BPB during pretraining"><br>FineWeb</td>
-    <td align="center" width="50%"><img src="figs/dclm_best_val_bpb_vs_tokens.png" width="100%" alt="DCLM validation BPB versus training tokens"><br>Token scaling</td>
-  </tr>
-  <tr>
-    <td align="center" width="50%"><img src="figs/dclm_best_val_bpb_vs_depth.png" width="100%" alt="DCLM validation BPB versus model depth"><br>Depth scaling</td>
-    <td align="center" width="50%"><img src="figs/scaling_isoflop_dclm.png" width="100%" alt="DCLM IsoFLOP scaling curves"><br>IsoFLOP scaling</td>
+    <td align="center" width="50%"><img src="figs/qa_acc_vs_model_size.png" width="100%" alt="Average zero-shot accuracy versus model size across training datasets"><br>Zero-shot model-size scaling</td>
+    <td align="center" width="50%"><img src="figs/zero_shot_acc_vs_training_tokens.png" width="100%" alt="Zero-shot accuracy versus training tokens"><br>Zero-shot token scaling</td>
   </tr>
 </table>
 
@@ -102,31 +76,27 @@ Use `configs/train.yaml` as the default configuration and set
 
 Pretrained models are published in the
 [OpenESM Hugging Face collection](https://huggingface.co/collections/guan-wang/openesm).
-The collection includes models trained on OWT, DCLM, FineWeb, and ClimbMix in
-the 160M, 520M, and 1B parameter classes, together with the FineWeb SFT model.
+The collection includes 160M, 520M, and 1B models trained on DCLM, FineWeb, and
+ClimbMix; one 160M OWT model; and a FineWeb SFT model named
+`ESM-FineWeb-1B-CHAT`.
 
-The recommended repository format is the standard Transformers format. A
-legacy Lightning checkpoint can be converted with:
-
-```bash
-uv sync --extra cpu --extra hf
-python -m scripts.export_hf \
-  /path/to/model.ckpt \
-  /path/to/hf-model \
-  --tokenizer-dir /path/to/tokenizer
-```
-
-The exported directory contains `config.json`, `model.safetensors`, the
-custom modeling and configuration files, and tokenizer files. It can then be
-loaded with:
+Load a published model directly by its Hugging Face ID. The first call downloads
+and caches the weights and tokenizer:
 
 ```python
-from transformers import AutoModelForMaskedLM, AutoTokenizer
+import torch
+from esm.modeling_esm import load_checkpoint
 
-model_id = "guan-wang/ESM-OWT-160M"
-tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-model = AutoModelForMaskedLM.from_pretrained(model_id, trust_remote_code=True)
+model_id = "guan-wang/ESM-FineWeb-1B-CHAT"
+model, tokenizer, hparams, device = load_checkpoint(model_id, device="cuda")
+tokens = tokenizer.encode("Hello, ESM.", append=tokenizer.get_bos_token_id())
+input_ids = torch.tensor([tokens], dtype=torch.long, device=device)
+with torch.no_grad():
+    logits = model(input_ids)
+print(logits.shape)
 ```
+
+Replace the model ID with any repository listed in the collection.
 
 ## 💬 Chat Demo
 
@@ -134,29 +104,18 @@ model = AutoModelForMaskedLM.from_pretrained(model_id, trust_remote_code=True)
   <img src="figs/chat.jpg" alt="ESM Chat web interface" width="850">
 </p>
 
-Run the interactive demo with a local checkpoint:
+Run the browser chat with the published SFT model:
 
 ```bash
-bash runs/chat.sh \
-  --checkpoint /path/to/model.ckpt \
-  --tokenizer-path /path/to/tokenizer
+bash runs/chat.sh --web \
+  --checkpoint guan-wang/ESM-FineWeb-1B-CHAT \
+  --host 0.0.0.0 \
+  --port 8000
 ```
 
-The demo uses the checkpoint's saved hyperparameters and supports the same
-tokenizer assets as standalone checkpoint loading.
-
-From the repository root:
-
-```bash
-uv sync --extra gpu
-```
-
-Use `--extra cpu` on a CPU-only machine. Add `--group dev` for the test
-dependencies:
-
-```bash
-uv sync --extra cpu --group dev
-```
+Open [http://localhost:8000](http://localhost:8000) in a browser on the server
+machine. If the server runs on a remote GPU node, use your cluster's port
+forwarding to expose port 8000 on your local machine.
 
 The PyTorch CPU and CUDA indexes are configured in `pyproject.toml`. Choose
 one extra per environment.
@@ -170,34 +129,37 @@ root, so relative paths are stable in local shells and distributed jobs.
 # Pretraining: training length comes from TARGET_TOTAL_TOKENS.
 TARGET_TOTAL_TOKENS=100000000 bash runs/train.sh
 
-# Supervised fine-tuning from an explicit checkpoint.
-bash runs/sft.sh \
-  --execution_mode finetune \
+# Fine-tuning: initialize from a published Hugging Face model.
+TARGET_TOTAL_TOKENS=100000000 bash runs/sft.sh \
   --dataset_name esm_sft \
-  --finetuning_model_ckpt /path/to/pretrain.ckpt
+  --finetuning_model_ckpt guan-wang/ESM-DCLM-1B
 
 # Position-wise BPB evaluation.
+MODEL_DIR="$(python -c 'from huggingface_hub import snapshot_download; print(snapshot_download(repo_id="guan-wang/ESM-DCLM-1B"))')"
 bash runs/eval.sh \
-  --checkpoint /path/to/model.ckpt \
+  --checkpoint guan-wang/ESM-DCLM-1B \
   --dataset dclm \
   --data-dir /path/to/data \
+  --tokenizer-path "${MODEL_DIR}" \
   --output_root . \
   --run_name eval-dclm
 
 # QA evaluation.
 bash runs/qa.sh \
-  --checkpoint /path/to/model.ckpt \
+  --checkpoint guan-wang/ESM-DCLM-1B \
+  --tokenizer-path "${MODEL_DIR}" \
   --eval-bundle /path/to/eval_bundle \
   --output_root . \
   --run_name qa-dclm
 
 # Interactive generation.
-bash runs/chat.sh --checkpoint /path/to/model.ckpt
-
-# Zero-shot evaluation uses an OWT-pretrained checkpoint and prepared data.
-CKPT=/path/to/owt-model.ckpt DATA_ROOT=/path/to/zeroshot-data \
-  bash runs/zeroshot.sh
+bash runs/chat.sh --checkpoint guan-wang/ESM-FineWeb-1B-CHAT
 ```
+
+Chat, validation evaluation, QA evaluation, and SFT initialization accept
+published Hugging Face model IDs. BPB evaluation also needs the local snapshot
+directory for `token_bytes.pt`. Zero-shot evaluation currently expects a local
+Lightning checkpoint.
 
 Training reads `configs/train.yaml`; evaluation reads `configs/eval.yaml`.
 Explicit command-line arguments take precedence over YAML values. Training
@@ -220,48 +182,29 @@ Data and tokenizer assets are not included in the repository. Pass their
 locations through the configuration or command line. Supported pretraining
 and BPB datasets include DCLM, FineWeb, ClimbMix, and OWT.
 
-## Standalone checkpoint loading
+## Load from Hugging Face
 
-`esm/modeling_esm.py` contains the model classes and loader for Lightning
-checkpoints. To share a Lightning checkpoint for direct ESM loading, include
-the checkpoint and tokenizer assets alongside this file:
-
-```text
-model-repository/
-├── modeling_esm.py
-├── model.ckpt
-└── tokenizer/
-    ├── tokenizer.pkl
-    └── token_bytes.pt
-```
-
-Install PyTorch and `tiktoken`, copy `modeling_esm.py` beside the checkpoint,
-and run:
+`load_checkpoint()` accepts a Hugging Face model ID and downloads the
+Transformers weights and tokenizer automatically. For example:
 
 ```python
 import torch
-from modeling_esm import load_checkpoint
+from esm.modeling_esm import load_checkpoint
 
 model, tokenizer, hparams, device = load_checkpoint(
-    "model.ckpt",
-    tokenizer_path="tokenizer",
+    "guan-wang/ESM-OWT-160M", device="cuda"
 )
-
-input_ids = torch.tensor(
-    [tokenizer.encode("hello", append=tokenizer.get_bos_token_id())],
-    device=device,
-)
-logits = model(input_ids)
+tokens = tokenizer.encode("hello", append=tokenizer.get_bos_token_id())
+input_ids = torch.tensor([tokens], dtype=torch.long, device=device)
+with torch.no_grad():
+    logits = model(input_ids)
 print(logits.shape)
 ```
 
-If the checkpoint and `tokenizer/` directory are siblings, omit
-`tokenizer_path`. `token_bytes.pt` is needed for BPB evaluation; logits-only
-inference only needs `tokenizer.pkl`. The loader accepts a Lightning
-checkpoint, a local Transformers directory, or a Hugging Face model ID and
-returns the same inference interface. Standard Transformers repositories
-also include `configuration_esm.py`, model weights, `config.json`, and
-tokenizer files; `scripts/export_hf.py` creates this layout.
+For BPB evaluation, download the same model repository locally and pass that
+directory as `--tokenizer-path`; it contains the tokenizer byte table used by
+the metric. The loader also supports local Transformers directories and
+Lightning checkpoints produced by this training code.
 
 ## Repository layout
 
@@ -291,12 +234,10 @@ openesm/
 │   └── trainer.py                             # Lightning training and evaluation module
 ├── figs/                                    # README figures and demo images
 │   ├── chat.jpg                               # Web chat interface screenshot
-│   ├── dclm_best_val_bpb_vs_depth.png          # DCLM depth scaling plot
-│   ├── dclm_best_val_bpb_vs_tokens.png         # DCLM token scaling plot
-│   ├── scaling_isoflop_dclm.png                # DCLM IsoFLOP scaling plot
-│   ├── scaling_pretrain_climbmix_validation_bpb.png # ClimbMix validation BPB plot
-│   ├── scaling_pretrain_dclm_validation_bpb.png     # DCLM validation BPB plot
-│   └── scaling_pretrain_fineweb_validation_bpb.png  # FineWeb validation BPB plot
+│   ├── dclm_best_val_bpb_vs_depth.png          # DCLM parameter scaling plot
+│   ├── qa_acc_vs_model_size.png                # Zero-shot accuracy by model size
+│   ├── scaling_pretrain_dclm_validation_bpb.png # DCLM validation BPB by tokens
+│   └── zero_shot_acc_vs_training_tokens.png    # Zero-shot accuracy by tokens
 ├── runs/                                    # Shell entry points for common workflows
 │   ├── chat.sh                   # Launch interactive chat
 │   ├── eval.sh                   # Run validation evaluation
@@ -335,10 +276,6 @@ openesm/
 └── uv.lock                                   # Locked dependency versions
 ```
 
-Cluster-specific rjob submitters, private data, checkpoints, caches, logs,
-and generated outputs are kept outside the public source tree or ignored by
-`.gitignore`.
-
 ## Development
 
 ```bash
@@ -349,6 +286,3 @@ python -m scripts.eval --help
 python -m scripts.qa --help
 python -m scripts.chat --help
 ```
-
-The public tree is intended to stay small: the model, its data interfaces,
-the runnable entry points, and lightweight tests are the source of truth.
