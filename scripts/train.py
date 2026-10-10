@@ -339,33 +339,14 @@ def main(args):
             "ESM requires time_embedding=true; the non-time-embedding path was removed"
         )
 
-    if os.getenv("SLURM_JOB_NUM_NODES") is not None:
-        args.num_nodes = int(os.getenv("SLURM_JOB_NUM_NODES"))
-        print(f"num_nodes={args.num_nodes} (from SLURM_JOB_NUM_NODES)")
-    elif os.getenv("NODE_COUNT") is not None:
-        args.num_nodes = int(os.getenv("NODE_COUNT"))
-        print(f"num_nodes={args.num_nodes} (from NODE_COUNT)")
-    elif (
-        os.getenv("WORLD_SIZE") is not None
-        and os.getenv("LOCAL_WORLD_SIZE") is not None
-    ):
-        world_size = int(os.getenv("WORLD_SIZE"))
-        local_world_size = int(os.getenv("LOCAL_WORLD_SIZE"))
-        args.num_nodes = max(1, world_size // local_world_size)
-        print(
-            f"num_nodes={args.num_nodes} (inferred from WORLD_SIZE={world_size} / LOCAL_WORLD_SIZE={local_world_size})"
-        )
-    else:
-        args.num_nodes = 1
-        print("num_nodes=1 (default, no distributed env vars found)")
-    print("torch.cuda.device_count()", torch.cuda.device_count())
-    if args.gpus == "-1":
-        num_gpus = args.num_nodes * torch.cuda.device_count()
-    elif "[" in args.gpus:
-        num_gpus = len(args.gpus.split(","))
-        args.gpus = json.loads(args.gpus)
-    else:
-        num_gpus = int(args.gpus)
+    # num_nodes / proc_per_node / world_size are resolved once in esm/config.py
+    print(
+        f"num_nodes={args.num_nodes} proc_per_node={args.proc_per_node} "
+        f"world_size={args.world_size}"
+    )
+    num_gpus = args.world_size
+    # hand Lightning the resolved per-node device count
+    args.gpus = args.proc_per_node
     print("devices/args.gpus: ", args.gpus)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -383,13 +364,6 @@ def main(args):
         "batch_size_per_device",
         args.batch_size_per_device,
     )
-    configured_global_batch = int(getattr(args, "global_batch_size", 0) or 0)
-    if configured_global_batch and configured_global_batch != effective_batch_size:
-        raise ValueError(
-            "global_batch_size does not match the resolved distributed batch: "
-            f"configured={configured_global_batch}, actual={effective_batch_size} "
-            "(num_gpus × batch_size_per_device × accumulate_grad_batches)"
-        )
     if args.lr_scaling_rule:
         scaled_lr = args.peak_learning_rate * effective_batch_size / 256
         args.peak_learning_rate = scaled_lr
@@ -768,8 +742,23 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--gpus",
-        help="number of gpus or gpus list, -1 uses all GPUs. use -1 for multinode, if want to specify which GPUs to use specify as comma seperated str with brackets e.g. [0, 1]",
-        default="-1",
+        type=int,
+        default=-1,
+        help="GPUs per node (-1 = every visible device)",
+    )
+
+    parser.add_argument(
+        "--cuda_visible_devices",
+        type=str,
+        default="",
+        help="value for CUDA_VISIBLE_DEVICES; a value already in the environment wins",
+    )
+
+    parser.add_argument(
+        "--node_count",
+        type=int,
+        default=1,
+        help="number of nodes; NODE_COUNT / SLURM / torchrun env take precedence",
     )
 
     parser.add_argument(

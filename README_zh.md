@@ -30,11 +30,22 @@ uv sync --extra gpu --extra hf --extra web
 source .venv/bin/activate
 ```
 
+下载并分词训练数据（首次训练前运行一次，需联网）。默认准备 `climbmix`、`dclm`、
+`fineweb` 全部三个，用 `--datasets` 只准备其中一部分：
+
+```bash
+bash runs/prepare_data.sh                  # 默认：climbmix + dclm + fineweb
+bash runs/prepare_data.sh --datasets dclm  # 只准备指定数据集
+```
+
 设置训练 token 预算后启动完整训练：
 
 ```bash
 TARGET_TOTAL_TOKENS=100000000 bash runs/train.sh
 ```
+
+> 数据准备需要联网，请在联网的 cpu-worker 上先执行一次；训练本身不联网，
+> 但必须在已经准备好数据的机器上运行。
 
 ## 📈 Scaling Law
 

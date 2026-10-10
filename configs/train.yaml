@@ -12,8 +12,9 @@ base_train_dataset: "dclm"
 base_train_data_root: "${ESM_DATA_ROOT:-data}"
 esm_asset_root: "${ESM_ASSET_ROOT:-.cache}"
 
-node_count: 2
-proc_per_node: 8
+node_count: 1
+gpus: -1
+cuda_visible_devices: "1,2,3,4"
 device_batch_size: 4
 global_batch_size: 512
 context_length: 2048

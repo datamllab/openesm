@@ -156,8 +156,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--datasets",
         nargs="+",
-        choices=("climbmix", "dclm"),
-        default=["climbmix", "dclm"],
+        choices=("climbmix", "dclm", "fineweb"),
+        default=["climbmix", "dclm", "fineweb"],
     )
     parser.add_argument("--target-tokens", type=int, default=DEFAULT_TARGET_TOKENS)
     parser.add_argument("--margin", type=float, default=DEFAULT_MARGIN)
@@ -174,6 +174,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="0 means no limit; useful for smoke tests",
+    )
+    parser.add_argument(
+        "--fineweb-shards",
+        type=int,
+        default=0,
+        help="FineWeb shards to fetch (0 = esm.dataset default); the last one is validation",
+    )
+    parser.add_argument(
+        "--fineweb-workers", type=int, default=4, help="parallel FineWeb downloads"
     )
     return parser.parse_args()
 
@@ -909,8 +918,21 @@ def main() -> None:
     log(f"datasets={args.datasets}")
     log(f"target_tokens={args.target_tokens:,}; margin={args.margin:.2%}")
     log(f"effective_stop_tokens={int(args.target_tokens * (1.0 + args.margin)):,}")
-    tokenizer, bos = load_tokenizer(args.repo_root)
+    tokenizer = bos = None
     for dataset_name in args.datasets:
+        if dataset_name == "fineweb":
+            # FineWeb-Edu shards are already in the target layout, so they only
+            # need downloading (no repackaging or token budgeting).
+            from esm.dataset import FINEWEB_DEFAULT_SHARDS, download_fineweb
+
+            download_fineweb(
+                num_shards=args.fineweb_shards or FINEWEB_DEFAULT_SHARDS,
+                num_workers=args.fineweb_workers,
+                data_dir=str(args.repo_root / "data" / "fineweb"),
+            )
+            continue
+        if tokenizer is None:
+            tokenizer, bos = load_tokenizer(args.repo_root)
         prepare_dataset(args, dataset_name, tokenizer, bos)
     data_root = args.repo_root / "data"
     log(f"Final data dir size: {format_gib(bytes_in_tree(data_root))} at {data_root}")

@@ -114,6 +114,13 @@ _TOKEN_BUDGET_ONLY_KEYS = {
     "accumulate_grad_batches",
 }
 
+# Derived from the distributed shape / canonical inputs; never set directly.
+_DERIVED_KEYS = {
+    "proc_per_node",  # len(gpus) or the launcher environment
+    "world_size",  # num_nodes × proc_per_node
+    "num_nodes",  # node_count or the launcher environment
+}
+
 
 def _normalise_value(value: Any, current: Any = None) -> Any:
     """Convert YAML scalar values to values suitable for argparse attributes."""
@@ -223,6 +230,103 @@ def resolve_run_paths(
     return args
 
 
+def _cuda_device_count() -> int:
+    """Visible GPU count, without importing torch unless it is already available."""
+
+    try:
+        import torch
+    except ImportError:
+        return 0
+    return torch.cuda.device_count() if torch.cuda.is_available() else 0
+
+
+def _resolve_num_nodes(
+    args: argparse.Namespace, values: dict[str, Any], explicit: set[str]
+) -> int:
+    """Node count: explicit CLI > launcher env > yaml."""
+
+    if "node_count" in explicit:
+        return int(args.node_count)
+    if os.environ.get("NODE_COUNT") is not None:
+        return int(os.environ["NODE_COUNT"])
+    if os.environ.get("SLURM_JOB_NUM_NODES") is not None:
+        return int(os.environ["SLURM_JOB_NUM_NODES"])
+    world_size_env = os.environ.get("WORLD_SIZE")
+    local_world_size_env = os.environ.get("LOCAL_WORLD_SIZE")
+    if world_size_env is not None and local_world_size_env:
+        return max(1, int(world_size_env) // int(local_world_size_env))
+    return int(values.get("node_count", 1) or 1)
+
+
+def _visible_device_count() -> int:
+    """Number of CUDA devices visible to this process."""
+
+    count = _cuda_device_count()
+    if count:
+        return count
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible:
+        return len([part for part in visible.split(",") if part.strip()])
+    return 0
+
+
+def resolve_distributed_shape(
+    args: argparse.Namespace,
+    values: dict[str, Any],
+    explicit: set[str],
+    *,
+    kind: str = "train",
+) -> int:
+    """Resolve num_nodes / proc_per_node / world_size in exactly one place.
+
+    ``gpus`` is a per-node device count; ``cuda_visible_devices`` selects which
+    physical devices are visible. The latter is written to the environment before
+    any CUDA call so ``cuda:{rank}`` keeps pointing at a selected device.
+    """
+
+    # A value already present in the environment (launcher / shell) wins.
+    if not os.environ.get("CUDA_VISIBLE_DEVICES"):
+        configured_visible = str(getattr(args, "cuda_visible_devices", "") or "")
+        if configured_visible:
+            os.environ["CUDA_VISIBLE_DEVICES"] = configured_visible
+    # Keep the resolved config self-describing: report the value actually in effect.
+    args.cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    visible_count = _visible_device_count()
+
+    gpus = int(getattr(args, "gpus", -1) or -1)
+    if gpus > 0:
+        if visible_count and gpus > visible_count:
+            raise ValueError(
+                f"gpus={gpus} exceeds the {visible_count} visible device(s) "
+                f"(CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '')!r})"
+            )
+        local_world_size_env = os.environ.get("LOCAL_WORLD_SIZE")
+        if local_world_size_env is not None and int(local_world_size_env) != gpus:
+            raise ValueError(
+                f"gpus={gpus} disagrees with the launcher's {local_world_size_env} "
+                "process(es) per node"
+            )
+        proc_per_node = gpus
+    else:
+        local_world_size_env = os.environ.get("LOCAL_WORLD_SIZE")
+        if local_world_size_env is not None:
+            proc_per_node = int(local_world_size_env)
+        elif os.environ.get("PROC_PER_NODE") is not None:
+            proc_per_node = int(os.environ["PROC_PER_NODE"])
+        else:
+            proc_per_node = visible_count or 1
+    if proc_per_node <= 0:
+        raise ValueError("proc_per_node must be positive")
+
+    num_nodes = _resolve_num_nodes(args, values, explicit)
+    if kind == "eval" and num_nodes > 1:
+        raise ValueError("eval currently supports a single node; set node_count=1")
+    args.num_nodes = num_nodes
+    args.proc_per_node = proc_per_node
+    args.world_size = num_nodes * proc_per_node
+    return args.world_size
+
+
 def _apply_derived_values(
     args: argparse.Namespace, values: dict[str, Any], explicit: set[str]
 ) -> None:
@@ -235,14 +339,7 @@ def _apply_derived_values(
                 Path(values["base_train_data_root"]) / str(dataset)
             )
 
-    if os.environ.get("WORLD_SIZE"):
-        world_size = int(os.environ["WORLD_SIZE"])
-    else:
-        node_count = int(os.environ.get("NODE_COUNT", values.get("node_count", 1)))
-        proc_per_node = int(
-            os.environ.get("PROC_PER_NODE", values.get("proc_per_node", 1))
-        )
-        world_size = node_count * proc_per_node
+    world_size = resolve_distributed_shape(args, values, explicit)
 
     device_batch = int(getattr(args, "batch_size_per_device", 0) or 0)
     global_batch = int(getattr(args, "global_batch_size", 0) or 0)
@@ -316,15 +413,15 @@ def merge_yaml_into_args(
 
     explicit = _explicit_destinations(parser, argv)
     if kind == "train":
-        conflicting = sorted(
-            key for key in values if _ALIASES.get(key, key) in _TOKEN_BUDGET_ONLY_KEYS
+        derived = sorted(
+            key
+            for key in values
+            if _ALIASES.get(key, key) in (_TOKEN_BUDGET_ONLY_KEYS | _DERIVED_KEYS)
         )
-        if conflicting:
+        if derived:
             raise ValueError(
-                "training length and gradient accumulation are derived from "
-                "TARGET_TOTAL_TOKENS, global_batch_size, batch_size_per_device, "
-                "and the distributed world size; remove these conflicting config "
-                f"keys: {', '.join(conflicting)}"
+                "these config keys are derived and cannot be set directly; remove "
+                f"them from the YAML and set their inputs instead: {', '.join(derived)}"
             )
     for key, value in values.items():
         dest = _ALIASES.get(key, key)
@@ -334,6 +431,8 @@ def merge_yaml_into_args(
         setattr(args, dest, _normalise_value(value, current))
     if kind == "train":
         _apply_derived_values(args, values, explicit)
+    elif kind == "eval":
+        resolve_distributed_shape(args, values, explicit, kind="eval")
 
     if hasattr(args, "checkpoint_dir"):
         resolve_run_paths(args)

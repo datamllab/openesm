@@ -46,11 +46,23 @@ uv sync --extra gpu --extra hf --extra web
 source .venv/bin/activate
 ```
 
+Download and tokenize the training data (run once before the first training job;
+requires network). Prepares `climbmix`, `dclm`, and `fineweb` by default; use
+`--datasets` to prepare only a subset:
+
+```bash
+bash runs/prepare_data.sh                  # default: climbmix + dclm + fineweb
+bash runs/prepare_data.sh --datasets dclm  # only the named datasets
+```
+
 Run a complete training job by setting the token budget:
 
 ```bash
 TARGET_TOTAL_TOKENS=100000000 bash runs/train.sh
 ```
+
+> Data preparation needs network access, so run it once on a networked
+> cpu-worker. Training itself is offline, but must run where the data is ready.
 
 ## 📈 Scaling Law
 
@@ -192,7 +204,7 @@ import torch
 from esm.modeling_esm import load_checkpoint
 
 model, tokenizer, hparams, device = load_checkpoint(
-    "guan-wang/ESM-OWT-160M", device="cuda"
+    "guan-wang/ESM-FineWeb-1B", device="cuda"
 )
 tokens = tokenizer.encode("hello", append=tokenizer.get_bos_token_id())
 input_ids = torch.tensor([tokens], dtype=torch.long, device=device)

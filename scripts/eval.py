@@ -154,6 +154,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-per-task", type=int, default=-1)
     parser.add_argument("--tokenizer-path", default="")
     parser.add_argument("--gpus", type=int, default=-1)
+    parser.add_argument("--cuda_visible_devices", default="")
+    parser.add_argument("--node_count", type=int, default=1)
     parser.add_argument("--task-samples", default="")
     parser.add_argument("--num-trajectory-samples", type=int, default=10)
     parser.add_argument("--history-timing", default="")
@@ -1559,16 +1561,15 @@ Examples:
                 task_name, num_samples = item.split(":", 1)
                 task_samples_dict[task_name.strip()] = int(num_samples.strip())
 
-    if args.gpus == -1:
-        if torch.cuda.is_available():
-            num_gpus = torch.cuda.device_count()
-            print(f"Auto-detected {num_gpus} GPU(s)")
-        else:
-            num_gpus = 0
-            print("No GPU detected, using CPU")
-    else:
+    if args.gpus > 0:
         num_gpus = args.gpus
         print(f"Using {num_gpus} GPU(s) as specified")
+    elif torch.cuda.is_available():
+        num_gpus = torch.cuda.device_count()
+        print(f"Auto-detected {num_gpus} GPU(s)")
+    else:
+        num_gpus = 0
+        print("No GPU detected, using CPU")
 
     dtype = torch.float32 if args.dtype == "float32" else torch.bfloat16
 
@@ -1729,7 +1730,6 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_with_config(parser, kind="eval", argv=argv)
     args = _resolve_eval_paths(args)
     args.device_batch_size = args.batch_size_per_device
-    args.grad_accum = args.accumulate_grad_batches
     print_resolved_config(args, kind="eval")
     return evaluate(args)
 

@@ -270,11 +270,40 @@ class RustBPETokenizer:
         return ids
 
 
+HF_TOKENIZER_REPO = "guan-wang/ESM-ClimbMix-160M"
+
+
+def ensure_tokenizer_assets(tokenizer_dir, filenames):
+    """Download any of ``filenames`` that is missing from ``tokenizer_dir``."""
+
+    missing = [
+        name
+        for name in filenames
+        if not os.path.exists(os.path.join(tokenizer_dir, name))
+    ]
+    if not missing:
+        return tokenizer_dir
+
+    from huggingface_hub import hf_hub_download
+
+    os.makedirs(tokenizer_dir, exist_ok=True)
+    for name in missing:
+        print(
+            f"[tokenizer] {name} missing from {tokenizer_dir}; downloading from "
+            f"huggingface.co/{HF_TOKENIZER_REPO}"
+        )
+        hf_hub_download(
+            repo_id=HF_TOKENIZER_REPO, filename=name, local_dir=tokenizer_dir
+        )
+    return tokenizer_dir
+
+
 def get_tokenizer(tokenizer_dir=None):
     if tokenizer_dir is None:
         from esm.common import get_base_dir
 
         tokenizer_dir = os.path.join(get_base_dir(), "tokenizer")
+    ensure_tokenizer_assets(tokenizer_dir, ("tokenizer.pkl",))
     return RustBPETokenizer.from_directory(tokenizer_dir)
 
 
@@ -285,10 +314,8 @@ def get_token_bytes(device="cpu", tokenizer_dir=None):
         from esm.common import get_base_dir
 
         tokenizer_dir = os.path.join(get_base_dir(), "tokenizer")
+    ensure_tokenizer_assets(tokenizer_dir, ("token_bytes.pt",))
     token_bytes_path = os.path.join(tokenizer_dir, "token_bytes.pt")
-    assert os.path.exists(token_bytes_path), (
-        f"Token bytes not found at {token_bytes_path}? Prepare the tokenizer assets first."
-    )
     with open(token_bytes_path, "rb") as f:
         token_bytes = torch.load(f, map_location=device)
     return token_bytes

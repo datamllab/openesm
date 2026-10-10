@@ -10,21 +10,23 @@ cd "${REPO_ROOT}"
 read -r -a EXTRA_ARGS <<< "${TRAIN_ARGS:-}"
 TRAIN_ARGS=(--config "${CONFIG_FILE}" "${EXTRA_ARGS[@]}" "$@")
 
-NODE_COUNT="${NODE_COUNT:-1}"
-PROC_PER_NODE="${PROC_PER_NODE:-1}"
-export NODE_COUNT PROC_PER_NODE
-if [[ "${DISTRIBUTED_JOB:-false}" == "true" || "${NODE_COUNT}" -gt 1 || "${PROC_PER_NODE}" -gt 1 ]]; then
+# Export only what the caller explicitly set. Defaulting to 1 here would shadow
+# the YAML values that esm/config.py falls back to.
+if [[ -n "${NODE_COUNT:-}" ]]; then export NODE_COUNT; fi
+if [[ -n "${PROC_PER_NODE:-}" ]]; then export PROC_PER_NODE; fi
+
+if [[ "${DISTRIBUTED_JOB:-false}" == "true" || "${NODE_COUNT:-1}" -gt 1 || "${PROC_PER_NODE:-1}" -gt 1 ]]; then
     if [[ -n "${MASTER_ADDR:-}" && -n "${NODE_RANK:-}" ]]; then
         exec torchrun \
-            --nnodes="${NODE_COUNT}" \
+            --nnodes="${NODE_COUNT:-1}" \
             --node_rank="${NODE_RANK}" \
-            --nproc_per_node="${PROC_PER_NODE}" \
+            --nproc_per_node="${PROC_PER_NODE:-1}" \
             --master_addr="${MASTER_ADDR}" \
             --master_port="${MASTER_PORT:-29500}" \
             --module scripts.train \
             "${TRAIN_ARGS[@]}"
     fi
-    exec torchrun --standalone --nproc_per_node="${PROC_PER_NODE}" \
+    exec torchrun --standalone --nproc_per_node="${PROC_PER_NODE:-1}" \
         --module scripts.train "${TRAIN_ARGS[@]}"
 fi
 
